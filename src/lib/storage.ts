@@ -56,6 +56,7 @@ export interface Approval {
   status: 'pending' | 'approved' | 'declined';
   timestamp?: string;
   reason?: string;
+  allottedPerson?: string;
 }
 
 export interface HistoryEntry {

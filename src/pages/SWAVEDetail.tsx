@@ -27,6 +27,7 @@ const SWAVEDetail = () => {
   const [request, setRequest] = useState(getRequestByTicketNumber(ticketNumber || ''));
   const [comment, setComment] = useState('');
   const [declineReason, setDeclineReason] = useState('');
+  const [allottedPerson, setAllottedPerson] = useState('');
   const history = getHistoryByTicketNumber(ticketNumber || '');
 
   useEffect(() => {
@@ -40,11 +41,22 @@ const SWAVEDetail = () => {
   const canApprove = isApprover(request, currentUser.empemail);
   const currentApprover = getCurrentApprover(request);
   const fullyApproved = isFullyApproved(request);
+  
+  // Check if current user is final approver for plant visit
+  const isFinalPlantApprover = request.typeOfLocation === 'Plant' && 
+    (currentUser.empemail === 'chandra.kumar@premierenergies.com' || 
+     currentUser.empemail === 'saluja@premierenergies.com') && 
+    canApprove;
 
   const handleApprove = () => {
     const updatedApprovals = request.approvals.map(approval =>
       approval.approverEmail === currentUser.empemail
-        ? { ...approval, status: 'approved' as const, timestamp: new Date().toISOString() }
+        ? { 
+            ...approval, 
+            status: 'approved' as const, 
+            timestamp: new Date().toISOString(),
+            ...(isFinalPlantApprover && allottedPerson ? { allottedPerson } : {})
+          }
         : approval
     );
 
@@ -75,6 +87,7 @@ const SWAVEDetail = () => {
     });
 
     setComment('');
+    setAllottedPerson('');
   };
 
   const handleDecline = () => {
@@ -315,6 +328,18 @@ const SWAVEDetail = () => {
                   <CardDescription>You are the current approver</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
+                  {isFinalPlantApprover && (
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Allot Person to Visit</label>
+                      <Textarea
+                        placeholder="Enter name of person to allot to this visit"
+                        value={allottedPerson}
+                        onChange={(e) => setAllottedPerson(e.target.value)}
+                        rows={2}
+                        className="resize-none"
+                      />
+                    </div>
+                  )}
                   <div className="space-y-2">
                     <Textarea
                       placeholder="Add a comment (optional)"
@@ -371,6 +396,11 @@ const SWAVEDetail = () => {
                         {approval.timestamp && (
                           <p className="text-xs text-muted-foreground mt-1">
                             {new Date(approval.timestamp).toLocaleString('en-IN')}
+                          </p>
+                        )}
+                        {approval.allottedPerson && (
+                          <p className="text-xs text-primary mt-1 font-medium">
+                            Allotted to: {approval.allottedPerson}
                           </p>
                         )}
                         {approval.reason && (
