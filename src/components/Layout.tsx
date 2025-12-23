@@ -1,8 +1,17 @@
-import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { Button } from './ui/button';
-import { Waves, LayoutDashboard, FileText, BarChart3, Shield, LogOut } from 'lucide-react';
-import { setCurrentUser, getCurrentUser } from '@/lib/storage';
-import { useToast } from '@/hooks/use-toast';
+// Layout.tsx
+import { useLocation, useNavigate } from "react-router-dom";
+import { NavLink } from "./NavLink";
+import { Button } from "./ui/button";
+import {
+  Waves,
+  LayoutDashboard,
+  FileText,
+  BarChart3,
+  Shield,
+  LogOut,
+} from "lucide-react";
+import { setCurrentUser, getCurrentUser } from "@/lib/storage";
+import { useToast } from "@/hooks/use-toast";
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -14,21 +23,32 @@ const Layout = ({ children }: LayoutProps) => {
   const { toast } = useToast();
   const currentUser = getCurrentUser();
 
+  const isSecurityUser =
+    currentUser?.empemail?.toLowerCase() === "security@premierenergies.com";
+
   const handleLogout = () => {
     setCurrentUser(null);
     toast({
-      title: 'Logged Out',
-      description: 'You have been successfully logged out',
+      title: "Logged Out",
+      description: "You have been successfully logged out",
     });
-    navigate('/login');
+    navigate("/login");
   };
 
-  const navItems = [
-    { path: '/overview', icon: LayoutDashboard, label: 'Overview' },
-    { path: '/request', icon: FileText, label: 'New Request' },
-    { path: '/analytics', icon: BarChart3, label: 'Analytics' },
-    { path: '/security', icon: Shield, label: 'Security' },
-  ];
+  // 🔒 Nav items depend on role
+  const navItems = isSecurityUser
+    ? [
+        {
+          path: "/security",
+          icon: Shield,
+          label: "Security",
+        },
+      ]
+    : [
+        { path: "/overview", icon: LayoutDashboard, label: "Overview" },
+        { path: "/request", icon: FileText, label: "New Request" },
+        { path: "/analytics", icon: BarChart3, label: "Analytics" },
+      ];
 
   return (
     <div className="min-h-screen bg-background">
@@ -42,22 +62,26 @@ const Layout = ({ children }: LayoutProps) => {
               </div>
               <div>
                 <h1 className="text-xl font-bold">WAVE</h1>
-                <p className="text-xs text-muted-foreground">Visitor Management</p>
+                <p className="text-xs text-muted-foreground">
+                  Welcome & Authenticate Visitor Entry
+                </p>
               </div>
             </div>
 
             <nav className="hidden md:flex items-center gap-1">
               {navItems.map((item) => (
-                <Link key={item.path} to={item.path}>
+                <NavLink key={item.path} to={item.path}>
                   <Button
-                    variant={location.pathname === item.path ? 'default' : 'ghost'}
+                    variant={
+                      location.pathname === item.path ? "default" : "ghost"
+                    }
                     size="sm"
                     className="gap-2"
                   >
                     <item.icon className="h-4 w-4" />
                     {item.label}
                   </Button>
-                </Link>
+                </NavLink>
               ))}
             </nav>
 
@@ -65,10 +89,18 @@ const Layout = ({ children }: LayoutProps) => {
               {currentUser && (
                 <div className="hidden sm:block text-right">
                   <p className="text-sm font-medium">{currentUser.empname}</p>
-                  <p className="text-xs text-muted-foreground">{currentUser.designation}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {currentUser.designation}
+                    {isSecurityUser ? " • Security" : ""}
+                  </p>
                 </div>
               )}
-              <Button onClick={handleLogout} variant="outline" size="sm" className="gap-2">
+              <Button
+                onClick={handleLogout}
+                variant="outline"
+                size="sm"
+                className="gap-2"
+              >
                 <LogOut className="h-4 w-4" />
                 <span className="hidden sm:inline">Logout</span>
               </Button>
@@ -82,25 +114,25 @@ const Layout = ({ children }: LayoutProps) => {
         <div className="container mx-auto px-4">
           <div className="flex items-center justify-around py-2">
             {navItems.map((item) => (
-              <Link key={item.path} to={item.path}>
+              <NavLink key={item.path} to={item.path}>
                 <Button
-                  variant={location.pathname === item.path ? 'default' : 'ghost'}
+                  variant={
+                    location.pathname === item.path ? "default" : "ghost"
+                  }
                   size="sm"
                   className="flex-col h-auto py-2 px-3"
                 >
                   <item.icon className="h-5 w-5" />
                   <span className="text-xs mt-1">{item.label}</span>
                 </Button>
-              </Link>
+              </NavLink>
             ))}
           </div>
         </div>
       </nav>
 
       {/* Main Content */}
-      <main className="container mx-auto px-4 py-6">
-        {children}
-      </main>
+      <main className="container mx-auto px-4 py-6">{children}</main>
     </div>
   );
 };

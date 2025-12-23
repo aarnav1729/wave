@@ -1,3 +1,4 @@
+// App.tsx
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -17,12 +18,39 @@ const queryClient = new QueryClient();
 
 const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
   const currentUser = getCurrentUser();
-  return currentUser ? <>{children}</> : <Navigate to="/login" replace />;
+
+  // Not logged in → login
+  if (!currentUser) {
+    return <Navigate to="/login" replace />;
+  }
+
+  // 🔒 Security user should NOT access normal routes → force /security
+  if (currentUser.empemail?.toLowerCase() === "security@premierenergies.com") {
+    return <Navigate to="/security" replace />;
+  }
+
+  return <>{children}</>;
+};
+
+const SecurityRoute = ({ children }: { children: React.ReactNode }) => {
+  const currentUser = getCurrentUser();
+
+  // Not logged in → login
+  if (!currentUser) {
+    return <Navigate to="/login" replace />;
+  }
+
+  // Only security user can access /security
+  if (currentUser.empemail?.toLowerCase() !== "security@premierenergies.com") {
+    return <Navigate to="/overview" replace />;
+  }
+
+  return <>{children}</>;
 };
 
 const App = () => {
   useEffect(() => {
-    initializeDefaultData();
+    void initializeDefaultData();
   }, []);
 
   return (
@@ -34,12 +62,52 @@ const App = () => {
           <Routes>
             <Route path="/" element={<Navigate to="/login" replace />} />
             <Route path="/login" element={<Login />} />
-            <Route path="/overview" element={<ProtectedRoute><Overview /></ProtectedRoute>} />
-            <Route path="/request" element={<ProtectedRoute><RequestForm /></ProtectedRoute>} />
-            <Route path="/swave/:ticketNumber" element={<ProtectedRoute><SWAVEDetail /></ProtectedRoute>} />
-            <Route path="/analytics" element={<ProtectedRoute><Analytics /></ProtectedRoute>} />
-            <Route path="/security" element={<ProtectedRoute><Security /></ProtectedRoute>} />
-            {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
+
+            {/* Normal users only */}
+            <Route
+              path="/overview"
+              element={
+                <ProtectedRoute>
+                  <Overview />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/request"
+              element={
+                <ProtectedRoute>
+                  <RequestForm />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/swave/:ticketNumber"
+              element={
+                <ProtectedRoute>
+                  <SWAVEDetail />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/analytics"
+              element={
+                <ProtectedRoute>
+                  <Analytics />
+                </ProtectedRoute>
+              }
+            />
+
+            {/* Security-only */}
+            <Route
+              path="/security"
+              element={
+                <SecurityRoute>
+                  <Security />
+                </SecurityRoute>
+              }
+            />
+
+            {/* Catch-all */}
             <Route path="*" element={<NotFound />} />
           </Routes>
         </BrowserRouter>
