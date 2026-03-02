@@ -6,6 +6,7 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+.wwebjs_auth
 
 node_modules
 dist
@@ -22,3 +23,17 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# WhatsApp Web auth/session (wwebjs)
+server/.wwebjs_auth/
+server/.wwebjs_cache/
+**/.wwebjs_auth/
+**/.wwebjs_cache/
+
+# Chromium/Electron cache junk (often inside wwebjs_auth)
+**/GPUCache/
+**/Code Cache/
+**/Cache/
+**/Local Storage/
+**/Session Storage/
+**/Service Worker/

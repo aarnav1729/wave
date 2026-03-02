@@ -2,6 +2,8 @@
 "use strict";
 
 const path = require("path");
+require("dotenv").config({ path: path.resolve(__dirname, "../.env") }); // load wave/.env
+
 const fs = require("fs");
 const https = require("https");
 const express = require("express");
@@ -9,6 +11,8 @@ const cors = require("cors");
 const helmet = require("helmet");
 const compression = require("compression");
 const morgan = require("morgan");
+const cookieParser = require("cookie-parser");
+const jwt = require("jsonwebtoken");
 const sql = require("mssql");
 
 // === WhatsApp Web client import ============================================
@@ -17,48 +21,133 @@ const {
   sendWhatsAppTextWithQr,
 } = require("./whatsappClient.cjs");
 
+// ----------------------------------------------------------------------------
+// Helpers: env + file reading
+// ----------------------------------------------------------------------------
+function mustGetEnv(name) {
+  const v = process.env[name];
+  if (!v || !String(v).trim()) {
+    console.error(`❌ Missing required env: ${name}`);
+    process.exit(1);
+  }
+  return String(v)
+    .trim()
+    .replace(/^"(.*)"$/, "$1");
+}
+
+function readFileOrExit(filePath, label) {
+  try {
+    return fs.readFileSync(filePath, "utf8");
+  } catch (e) {
+    console.error(`❌ Failed to read ${label} at: ${filePath}`);
+    console.error(e.message || e);
+    process.exit(1);
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Time (match DIGI): IST day-bound sessions
+// ----------------------------------------------------------------------------
+const IST_OFFSET_MS = 330 * 60 * 1000; // +05:30
+function currentIstDay() {
+  return new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10); // YYYY-MM-DD
+}
+
+// ----------------------------------------------------------------------------
 // HTTPS port + host (same port for FE + BE)
-const PORT = Number(process.env.PORT) || 24443;
+// ----------------------------------------------------------------------------
+const PORT = Number(process.env.PORT) || 28443;
 const HOST = process.env.HOST || "0.0.0.0";
 
-// EXACT dbConfig AS PROVIDED BY YOU
-const dbConfig = {
-  user: "PEL_DB",
-  password: "Pel@0184",
-  server: "10.0.50.17",
-  port: 1433,
-  database: "wave",
-  // --- timeouts (ms) ---
-  // 0 = no timeout (let it run as long as it needs)
+// ----------------------------------------------------------------------------
+// SSO config (must match DIGI)
+// ----------------------------------------------------------------------------
+const COOKIE_DOMAIN = (process.env.COOKIE_DOMAIN || "").trim(); // ".premierenergies.com" in prod
+const ISSUER = process.env.ISSUER || "auth.premierenergies.com";
+const AUDIENCE = process.env.AUDIENCE || "apps.premierenergies.com";
+const ACCESS_TTL = process.env.ACCESS_TTL || "15m";
+const REFRESH_TTL = process.env.REFRESH_TTL || "30d";
+
+const DIGI_ORIGIN = (
+  process.env.DIGI_ORIGIN || "https://digi.premierenergies.com"
+).replace(/\/+$/, "");
+const APP_ORIGIN = (process.env.APP_ORIGIN || "").replace(/\/+$/, "");
+
+// Keys (public required; private used for refresh support)
+// If AUTH_PUBLIC_KEY_FILE is not set, fall back to repo path: wave/server/keys/auth-public.pem
+const AUTH_PUBLIC_KEY_FILE =
+  (process.env.AUTH_PUBLIC_KEY_FILE &&
+    String(process.env.AUTH_PUBLIC_KEY_FILE)
+      .trim()
+      .replace(/^"(.*)"$/, "$1")) ||
+  path.resolve(__dirname, "keys", "auth-public.pem");
+
+// If AUTH_PRIVATE_KEY_FILE is not set, fall back to repo path: wave/server/keys/auth-private.pem
+const AUTH_PRIVATE_KEY_FILE =
+  (process.env.AUTH_PRIVATE_KEY_FILE &&
+    String(process.env.AUTH_PRIVATE_KEY_FILE)
+      .trim()
+      .replace(/^"(.*)"$/, "$1")) ||
+  path.resolve(__dirname, "keys", "auth-private.pem");
+const AUTH_PUBLIC_KEY = readFileOrExit(
+  AUTH_PUBLIC_KEY_FILE,
+  "AUTH_PUBLIC_KEY_FILE"
+);
+const AUTH_PRIVATE_KEY = readFileOrExit(
+  AUTH_PRIVATE_KEY_FILE,
+  "AUTH_PRIVATE_KEY_FILE"
+);
+
+// ----------------------------------------------------------------------------
+// DB configs
+// ----------------------------------------------------------------------------
+
+// WAVE DB (your existing config, but allow env override)
+const waveDbConfig = {
+  user: process.env.WAVE_MSSQL_USER || "PEL_DB",
+  password: process.env.WAVE_MSSQL_PASSWORD || "V@aN3#@VaN",
+  server: process.env.WAVE_MSSQL_SERVER || "10.0.50.17",
+  port: Number(process.env.WAVE_MSSQL_PORT) || 1433,
+  database: process.env.WAVE_MSSQL_DB || "wave",
   requestTimeout: 100000,
   connectionTimeout: 10000000,
-  // optional: adjust pool idles if helpful
-  pool: {
-    idleTimeoutMillis: 300000,
-  },
+  pool: { idleTimeoutMillis: 300000 },
+  options: { encrypt: false, trustServerCertificate: true },
+};
+
+// SPOT auth DB (same as DIGI) to source EMP master
+const spotDbConfig = {
+  user: process.env.MSSQL_USER || "PEL_DB",
+  password: process.env.MSSQL_PASSWORD || "V@aN3#@VaN",
+  server: process.env.MSSQL_SERVER || "10.0.50.17",
+  port: Number(process.env.MSSQL_PORT) || 1433,
+  database: process.env.MSSQL_DB_AUTH || "SPOT",
   options: {
-    encrypt: false,
     trustServerCertificate: true,
+    encrypt: false,
+    connectionTimeout: 60000,
   },
 };
 
-// MSSQL Pool + DB Init (create tables, seed employees)
-let poolPromise;
+// ----------------------------------------------------------------------------
+// MSSQL Pools
+// ----------------------------------------------------------------------------
+let wavePoolPromise;
+let spotPoolPromise;
 
-/**
- * Get or create global MSSQL pool.
- */
-async function getPool() {
-  if (!poolPromise) {
-    poolPromise = sql.connect(dbConfig);
-  }
-  return poolPromise;
+async function getWavePool() {
+  if (!wavePoolPromise) wavePoolPromise = sql.connect(waveDbConfig);
+  return wavePoolPromise;
+}
+async function getSpotPool() {
+  if (!spotPoolPromise)
+    spotPoolPromise = new sql.ConnectionPool(spotDbConfig).connect();
+  return spotPoolPromise;
 }
 
-// ---------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
 // Plant config (mirrors frontend rules)
-// ---------------------------------------------------------------------------
-
+// ----------------------------------------------------------------------------
 const PLANT_SITES = ["P2", "P3", "P4", "P5", "P6", "P7"];
 
 const PLANT_SUB_OPTIONS = {
@@ -78,27 +167,14 @@ const PLANT_SUB_OPTIONS = {
 const isPlantLocationEntry = (loc) =>
   /^P[2-7]\b/.test(String(loc || "").trim());
 
-/**
- * Extract plantSite/plantArea/plantAreaOther from locationToVisit
- * The frontend currently stores Plant choice as:
- *   "P2 - Module (PEPPL)"
- *   "P2 - Admin"
- * We interpret unknown values as "Other" + store text in plantAreaOther.
- */
 function derivePlantFieldsFromLocation(locationToVisit) {
-  const out = {
-    plantSite: null,
-    plantArea: null,
-    plantAreaOther: null,
-  };
-
+  const out = { plantSite: null, plantArea: null, plantAreaOther: null };
   if (!locationToVisit || typeof locationToVisit !== "string") return out;
 
   const parts = locationToVisit
     .split(",")
     .map((x) => x.trim())
     .filter(Boolean);
-
   const plantEntry = parts.find((p) => isPlantLocationEntry(p));
   if (!plantEntry) return out;
 
@@ -110,37 +186,155 @@ function derivePlantFieldsFromLocation(locationToVisit) {
 
   out.plantSite = site;
 
-  if (!areaText) {
-    out.plantArea = null;
-    out.plantAreaOther = null;
-    return out;
-  }
+  if (!areaText) return out;
 
   const allowed = PLANT_SUB_OPTIONS[site] || [];
-
-  // If matches allowed option and is not literal "Other"
   if (allowed.includes(areaText) && areaText !== "Other") {
     out.plantArea = areaText;
     out.plantAreaOther = null;
     return out;
   }
 
-  // Otherwise treat as Other
   out.plantArea = "Other";
   out.plantAreaOther = areaText;
-
   return out;
 }
 
-/**
- * T-SQL to create tables IF NOT EXISTS.
- * This covers:
- * - Employees
- * - VisitRequests
- * - Guests
- * - Approvals
- * - HistoryEntries
- */
+// ----------------------------------------------------------------------------
+// SSO cookie helpers (match DIGI)
+// ----------------------------------------------------------------------------
+function setSsoCookies(req, res, access, refresh) {
+  const shouldSetDomain = !!(COOKIE_DOMAIN && String(COOKIE_DOMAIN).trim());
+
+  const baseCookie = {
+    httpOnly: true,
+    secure: true,
+    sameSite: "none",
+  };
+
+  const accessOpts = {
+    ...baseCookie,
+    path: "/",
+    maxAge: 15 * 60 * 1000,
+    ...(shouldSetDomain ? { domain: COOKIE_DOMAIN } : {}),
+  };
+
+  const refreshOpts = {
+    ...baseCookie,
+    path: "/auth",
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+    ...(shouldSetDomain ? { domain: COOKIE_DOMAIN } : {}),
+  };
+
+  res.cookie("sso", access, accessOpts);
+  res.cookie("sso_refresh", refresh, refreshOpts);
+}
+
+function clearSsoCookies(res) {
+  const clear = (opts) => {
+    res.clearCookie("sso", { path: "/", ...opts });
+    res.clearCookie("sso_refresh", { path: "/auth", ...opts });
+  };
+  clear({});
+  if (COOKIE_DOMAIN) clear({ domain: COOKIE_DOMAIN });
+}
+
+function issueTokens(payload) {
+  const day = currentIstDay();
+
+  const base = {
+    sub: payload.sub,
+    email: payload.email,
+    roles: payload.roles || [],
+    apps: payload.apps || [],
+    day,
+  };
+
+  const access = jwt.sign(base, AUTH_PRIVATE_KEY, {
+    algorithm: "RS256",
+    expiresIn: ACCESS_TTL,
+    issuer: ISSUER,
+    audience: AUDIENCE,
+  });
+
+  const refresh = jwt.sign({ ...base, typ: "refresh" }, AUTH_PRIVATE_KEY, {
+    algorithm: "RS256",
+    expiresIn: REFRESH_TTL,
+    issuer: ISSUER,
+    audience: AUDIENCE,
+  });
+
+  return { access, refresh };
+}
+
+// ----------------------------------------------------------------------------
+// Redirect builder (to DIGI)
+// ----------------------------------------------------------------------------
+function absoluteFromReq(req) {
+  if (APP_ORIGIN) return APP_ORIGIN;
+  const proto = req.protocol || "https";
+  const host = req.get("host");
+  return `${proto}://${host}`;
+}
+
+function buildDigiLoginUrl(req, returnTo) {
+  const rt = returnTo || absoluteFromReq(req) + "/";
+  return `${DIGI_ORIGIN}/login?returnTo=${encodeURIComponent(rt)}`;
+}
+
+// ----------------------------------------------------------------------------
+// Auth middleware (verify DIGI-issued JWT from cookie)
+// ----------------------------------------------------------------------------
+function requireAuth(req, res, next) {
+  const token = req.cookies?.sso;
+  if (!token) {
+    return res.status(401).json({
+      error: "unauthenticated",
+      redirect: buildDigiLoginUrl(req, absoluteFromReq(req) + req.originalUrl),
+    });
+  }
+
+  try {
+    const payload = jwt.verify(token, AUTH_PUBLIC_KEY, {
+      algorithms: ["RS256"],
+      issuer: ISSUER,
+      audience: AUDIENCE,
+    });
+
+    // Day-bound sessions (match DIGI)
+    if (!payload.day || payload.day !== currentIstDay()) {
+      clearSsoCookies(res);
+      return res.status(401).json({
+        error: "session_expired_day_change",
+        redirect: buildDigiLoginUrl(
+          req,
+          absoluteFromReq(req) + req.originalUrl
+        ),
+      });
+    }
+
+    req.user = payload;
+    return next();
+  } catch (e) {
+    return res.status(401).json({
+      error: "invalid_token",
+      redirect: buildDigiLoginUrl(req, absoluteFromReq(req) + req.originalUrl),
+    });
+  }
+}
+
+function requireWaveApp(req, res, next) {
+  const apps = Array.isArray(req.user?.apps) ? req.user.apps : [];
+  const allowed = new Set(apps.map((x) => String(x).toLowerCase()));
+  if (!allowed.has("wave")) {
+    return res.status(403).json({ error: "app_not_allowed" });
+  }
+  return next();
+}
+
+// ----------------------------------------------------------------------------
+// DB Init (tables + EMP sync stage)
+// ----------------------------------------------------------------------------
 const INIT_TABLES_SQL = `
 IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'Employees')
 BEGIN
@@ -153,6 +347,21 @@ BEGIN
     emplocation   NVARCHAR(100)  NULL,
     designation   NVARCHAR(100)  NULL,
     activeflag    INT            NOT NULL DEFAULT(1),
+    managerid     NVARCHAR(50)   NULL
+  );
+END;
+
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'EmployeeSyncStage')
+BEGIN
+  CREATE TABLE EmployeeSyncStage (
+    empid         NVARCHAR(50)   NOT NULL,
+    empemail      NVARCHAR(255)  NOT NULL,
+    empname       NVARCHAR(255)  NOT NULL,
+    dept          NVARCHAR(100)  NULL,
+    subdept       NVARCHAR(100)  NULL,
+    emplocation   NVARCHAR(100)  NULL,
+    designation   NVARCHAR(100)  NULL,
+    activeflag    INT            NOT NULL,
     managerid     NVARCHAR(50)   NULL
   );
 END;
@@ -173,22 +382,17 @@ BEGIN
     lunchCategory        NVARCHAR(100) NULL,
     dietaryRequirements  NVARCHAR(255) NULL,
     meetingWith          NVARCHAR(255) NOT NULL,
-
-    -- Updated sizing for multi-select + longer values
     typeOfLocation       NVARCHAR(100) NOT NULL,
     locationToVisit      NVARCHAR(1000) NOT NULL,
-
     areaToVisit          NVARCHAR(255) NOT NULL,
     cellLineVisit        BIT           NOT NULL DEFAULT(0),
     anythingElse         NVARCHAR(MAX) NULL,
-    attachments          NVARCHAR(MAX) NULL, -- JSON string if used
+    attachments          NVARCHAR(MAX) NULL,
     creationDatetime     DATETIME2     NOT NULL,
-    status               NVARCHAR(20)  NOT NULL, -- 'pending' | 'approved' | 'declined'
+    status               NVARCHAR(20)  NOT NULL,
     currentApproverIndex INT           NOT NULL DEFAULT(0),
     vehicleNumber        NVARCHAR(100) NULL,
     visitorTagNumber     NVARCHAR(100) NULL,
-
-    -- ✅ New Plant hierarchy fields
     plantSite            NVARCHAR(10)  NULL,
     plantArea            NVARCHAR(255) NULL,
     plantAreaOther       NVARCHAR(255) NULL,
@@ -220,101 +424,6 @@ BEGIN
   );
 END;
 
--- Ensure picture column exists on existing DBs
-IF NOT EXISTS (
-  SELECT 1
-  FROM sys.columns
-  WHERE Name = 'picture'
-    AND Object_ID = Object_ID('Guests')
-)
-BEGIN
-  ALTER TABLE Guests ADD picture NVARCHAR(MAX) NULL;
-END;
-
--- Ensure vehicleRequired column exists on existing VisitRequests tables
-IF NOT EXISTS (
-  SELECT 1
-  FROM sys.columns
-  WHERE Name = 'vehicleRequired'
-    AND Object_ID = Object_ID('VisitRequests')
-)
-BEGIN
-  ALTER TABLE VisitRequests ADD vehicleRequired BIT NOT NULL DEFAULT(0);
-END;
-
-IF NOT EXISTS (
-  SELECT 1
-  FROM sys.columns
-  WHERE Name = 'vehicleNumber'
-    AND Object_ID = Object_ID('VisitRequests')
-)
-BEGIN
-  ALTER TABLE VisitRequests ADD vehicleNumber NVARCHAR(100) NULL;
-END;
-
-IF NOT EXISTS (
-  SELECT 1
-  FROM sys.columns
-  WHERE Name = 'visitorTagNumber'
-    AND Object_ID = Object_ID('VisitRequests')
-)
-BEGIN
-  ALTER TABLE VisitRequests ADD visitorTagNumber NVARCHAR(100) NULL;
-END;
-
--- ✅ Ensure new Plant hierarchy columns exist on existing DBs
-IF NOT EXISTS (
-  SELECT 1
-  FROM sys.columns
-  WHERE Name = 'plantSite'
-    AND Object_ID = Object_ID('VisitRequests')
-)
-BEGIN
-  ALTER TABLE VisitRequests ADD plantSite NVARCHAR(10) NULL;
-END;
-
-IF NOT EXISTS (
-  SELECT 1
-  FROM sys.columns
-  WHERE Name = 'plantArea'
-    AND Object_ID = Object_ID('VisitRequests')
-)
-BEGIN
-  ALTER TABLE VisitRequests ADD plantArea NVARCHAR(255) NULL;
-END;
-
-IF NOT EXISTS (
-  SELECT 1
-  FROM sys.columns
-  WHERE Name = 'plantAreaOther'
-    AND Object_ID = Object_ID('VisitRequests')
-)
-BEGIN
-  ALTER TABLE VisitRequests ADD plantAreaOther NVARCHAR(255) NULL;
-END;
-
--- ✅ Expand typeOfLocation size safely
-IF EXISTS (
-  SELECT 1
-  FROM sys.columns
-  WHERE Name = 'typeOfLocation'
-    AND Object_ID = Object_ID('VisitRequests')
-)
-BEGIN
-  ALTER TABLE VisitRequests ALTER COLUMN typeOfLocation NVARCHAR(100) NOT NULL;
-END;
-
--- ✅ Expand locationToVisit size safely
-IF EXISTS (
-  SELECT 1
-  FROM sys.columns
-  WHERE Name = 'locationToVisit'
-    AND Object_ID = Object_ID('VisitRequests')
-)
-BEGIN
-  ALTER TABLE VisitRequests ALTER COLUMN locationToVisit NVARCHAR(1000) NOT NULL;
-END;
-
 IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'Approvals')
 BEGIN
   CREATE TABLE Approvals (
@@ -322,7 +431,7 @@ BEGIN
     ticketNumber   NVARCHAR(50) NOT NULL,
     approverId     NVARCHAR(50) NOT NULL,
     approverEmail  NVARCHAR(255) NOT NULL,
-    status         NVARCHAR(20) NOT NULL, -- 'pending' | 'approved' | 'declined'
+    status         NVARCHAR(20) NOT NULL,
     [timestamp]    DATETIME2    NULL,
     reason         NVARCHAR(MAX) NULL,
     allottedPerson NVARCHAR(255) NULL,
@@ -350,48 +459,184 @@ BEGIN
 END;
 `;
 
-/**
- * Seed default employees matching initializeDefaultData()
- */
-async function seedDefaultEmployees() {
-  const pool = await getPool();
-  const request = pool.request();
-
-  const MERGE_SQL = `
-MERGE Employees AS target
-USING (VALUES
-  ('PEPPL0874', 'aarnav.singh@premierenergies.com', 'Aarnav Singh',       'IT',          'IT',          'Corporate Office', 'Senior Executive',              1, 'PSS1431'),
-  ('PSS1431',   'ramesh.t@premierenergies.com',     'Tangirala Ramesh',   'IT',          'IT',          'Corporate Office', 'General Manager - Systems & Infrastructure', 1, 'PSS1373'),
-  ('PEPPL0548', 'chandra.kumar@premierenergies.com','Chandra Mauli Kumar','Production',  'Production',  'Fabcity',          'Chief Production Officer',      1, '10000'),
-  ('10000',     'saluja@premierenergies.com',       'Chiranjeev Singh',   'Management',  'Management',  'Corporate Office', 'Managing Director',             1, '10001'),
-  ('PEL1729',   'security@premierenergies.com',     'Security Manager',   'Security', 'Security', 'Fabcity',          'Security Manager',                            1, 'PEPPL0874')
-) AS source (empid, empemail, empname, dept, subdept, emplocation, designation, activeflag, managerid)
-ON target.empid = source.empid
-WHEN NOT MATCHED BY TARGET THEN
-  INSERT (empid, empemail, empname, dept, subdept, emplocation, designation, activeflag, managerid)
-  VALUES (source.empid, source.empemail, source.empname, source.dept, source.subdept, source.emplocation, source.designation, source.activeflag, source.managerid);
-`;
-
-  await request.query(MERGE_SQL);
+// ----------------------------------------------------------------------------
+// Employee sync: SPOT..EMP -> WAVE..Employees (for "same employees as DIGI")
+// ----------------------------------------------------------------------------
+async function getEmpColumns(pool) {
+  const r = await pool.request().query(`
+    SELECT LOWER(name) AS name
+      FROM sys.columns
+     WHERE object_id = OBJECT_ID('dbo.EMP')
+  `);
+  return new Set(r.recordset.map((x) => x.name));
 }
 
-/**
- * Run DB init: create tables + seed data.
- */
+function pickColumn(cols, candidates) {
+  for (const c of candidates) {
+    if (cols.has(String(c).toLowerCase())) return c;
+  }
+  return null;
+}
+
+async function syncEmployeesFromSpot() {
+  const wavePool = await getWavePool();
+  const spotPool = await getSpotPool();
+
+  const cols = await getEmpColumns(spotPool);
+
+  const cEmpId = pickColumn(cols, ["EmpID", "empid", "EmployeeID"]);
+  const cEmail = pickColumn(cols, ["EmpEmail", "empemail", "Email"]);
+  const cName = pickColumn(cols, ["EmpName", "empname", "FullName", "Name"]);
+  const cDept = pickColumn(cols, ["Dept", "Department"]);
+  const cSubDept = pickColumn(cols, ["SubDept", "SubDepartment"]);
+  const cLoc = pickColumn(cols, ["EmpLocation", "Location", "EmpLocationName"]);
+  const cDesig = pickColumn(cols, ["Designation", "Title"]);
+  const cActive = pickColumn(cols, ["ActiveFlag", "activeflag", "IsActive"]);
+  const cMgr = pickColumn(cols, [
+    "ManagerID",
+    "managerid",
+    "ReportingManagerID",
+    "HodId",
+  ]);
+
+  if (!cEmpId || !cEmail) {
+    console.warn(
+      "[EMP Sync] SPOT.dbo.EMP missing EmpID/EmpEmail columns. Skipping sync."
+    );
+    return;
+  }
+
+  const selectSql = `
+    SELECT
+      CAST(${cEmpId} AS NVARCHAR(50)) AS empid,
+      LOWER(LTRIM(RTRIM(CAST(${cEmail} AS NVARCHAR(255))))) AS empemail,
+      ${
+        cName
+          ? `CAST(${cName} AS NVARCHAR(255))`
+          : `LOWER(LTRIM(RTRIM(CAST(${cEmail} AS NVARCHAR(255)))))`
+      } AS empname,
+      ${cDept ? `CAST(${cDept} AS NVARCHAR(100))` : "NULL"} AS dept,
+      ${cSubDept ? `CAST(${cSubDept} AS NVARCHAR(100))` : "NULL"} AS subdept,
+      ${cLoc ? `CAST(${cLoc} AS NVARCHAR(100))` : "NULL"} AS emplocation,
+      ${cDesig ? `CAST(${cDesig} AS NVARCHAR(100))` : "NULL"} AS designation,
+      ${cActive ? `CAST(${cActive} AS INT)` : "1"} AS activeflag,
+      ${cMgr ? `CAST(${cMgr} AS NVARCHAR(50))` : "NULL"} AS managerid
+FROM dbo.EMP
+    WHERE ${cEmail} IS NOT NULL
+      AND LTRIM(RTRIM(CAST(${cEmail} AS NVARCHAR(255)))) <> ''
+      AND ${cEmpId} IS NOT NULL
+  `;
+
+  const spotEmployees = await spotPool.request().query(selectSql);
+  let rows = spotEmployees.recordset || [];
+
+  // Normalize + filter invalid + dedupe by email (Employees.empemail is UNIQUE)
+  const byEmail = new Map();
+
+  for (const r of rows) {
+    const empid = String(r.empid || "").trim();
+    const empemail = String(r.empemail || "")
+      .trim()
+      .toLowerCase();
+
+    if (!empid) continue;
+    if (!empemail) continue;
+
+    const existing = byEmail.get(empemail);
+
+    // Prefer active employees if duplicates exist
+    const rActive = Number.isFinite(r.activeflag) ? Number(r.activeflag) : 1;
+    const eActive = existing
+      ? Number.isFinite(existing.activeflag)
+        ? Number(existing.activeflag)
+        : 1
+      : -1;
+
+    if (!existing || (eActive !== 1 && rActive === 1)) {
+      byEmail.set(empemail, { ...r, empid, empemail, activeflag: rActive });
+    }
+  }
+
+  rows = Array.from(byEmail.values());
+  if (!rows.length) {
+    console.warn("[EMP Sync] No employees found in SPOT.dbo.EMP");
+    return;
+  }
+
+  // Stage + merge into wave Employees
+  await wavePool.request().query("TRUNCATE TABLE dbo.EmployeeSyncStage");
+
+  const makeTable = () => {
+    const t = new sql.Table("EmployeeSyncStage");
+    t.schema = "dbo";
+    t.create = false;
+    t.columns.add("empid", sql.NVarChar(50), { nullable: false });
+    t.columns.add("empemail", sql.NVarChar(255), { nullable: false });
+    t.columns.add("empname", sql.NVarChar(255), { nullable: false });
+    t.columns.add("dept", sql.NVarChar(100), { nullable: true });
+    t.columns.add("subdept", sql.NVarChar(100), { nullable: true });
+    t.columns.add("emplocation", sql.NVarChar(100), { nullable: true });
+    t.columns.add("designation", sql.NVarChar(100), { nullable: true });
+    t.columns.add("activeflag", sql.Int, { nullable: false });
+    t.columns.add("managerid", sql.NVarChar(50), { nullable: true });
+    return t;
+  };
+
+  const CHUNK = 5000;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const t = makeTable();
+    const slice = rows.slice(i, i + CHUNK);
+    for (const r of slice) {
+      t.rows.add(
+        String(r.empid || "").trim(),
+        String(r.empemail || "").trim(),
+        String(r.empname || "").trim() || String(r.empemail || "").trim(),
+        r.dept ? String(r.dept) : null,
+        r.subdept ? String(r.subdept) : null,
+        r.emplocation ? String(r.emplocation) : null,
+        r.designation ? String(r.designation) : null,
+        Number.isFinite(r.activeflag) ? Number(r.activeflag) : 1,
+        r.managerid ? String(r.managerid) : null
+      );
+    }
+    await wavePool.request().bulk(t);
+  }
+
+  await wavePool.request().query(`
+    MERGE dbo.Employees AS target
+    USING dbo.EmployeeSyncStage AS source
+      ON target.empid = source.empid
+    WHEN MATCHED THEN
+      UPDATE SET
+        empemail = source.empemail,
+        empname = source.empname,
+        dept = source.dept,
+        subdept = source.subdept,
+        emplocation = source.emplocation,
+        designation = source.designation,
+        activeflag = source.activeflag,
+        managerid = source.managerid
+    WHEN NOT MATCHED BY TARGET THEN
+      INSERT (empid, empemail, empname, dept, subdept, emplocation, designation, activeflag, managerid)
+      VALUES (source.empid, source.empemail, source.empname, source.dept, source.subdept, source.emplocation, source.designation, source.activeflag, source.managerid);
+  `);
+
+  console.log(`[EMP Sync] Synced ${rows.length} employees from SPOT -> WAVE`);
+}
+
 async function initDb() {
-  const pool = await getPool();
-  await pool.request().batch(INIT_TABLES_SQL);
-  await seedDefaultEmployees();
-  console.log("[DB] Tables ensured and default employees seeded.");
+  const wavePool = await getWavePool();
+  await wavePool.request().batch(INIT_TABLES_SQL);
+  await syncEmployeesFromSpot();
+  console.log("[DB] Tables ensured + employees synced from SPOT.");
 }
 
 // ----------------------------------------------------------------------------
 // Express App Setup
 // ----------------------------------------------------------------------------
-
 const app = express();
+app.set("trust proxy", 1);
 
-// Security / perf middlewares
 app.use(helmet());
 app.use(
   cors({
@@ -400,19 +645,16 @@ app.use(
   })
 );
 app.use(express.json({ limit: "25mb" }));
+app.use(cookieParser());
 app.use(compression());
 app.use(morgan("combined"));
 
 // ----------------------------------------------------------------------------
 // API Helpers
 // ----------------------------------------------------------------------------
-
 const asyncHandler = (fn) => (req, res, next) =>
   Promise.resolve(fn(req, res, next)).catch(next);
 
-/**
- * Helper that converts nullable Date to ISO string (or null).
- */
 function toIsoOrNull(value) {
   if (!value) return null;
   try {
@@ -423,15 +665,13 @@ function toIsoOrNull(value) {
 }
 
 // ----------------------------------------------------------------------------
-// API Routes
+// Public health
 // ----------------------------------------------------------------------------
-
-// Health checks
 app.get(
   "/api/health",
   asyncHandler(async (req, res) => {
     try {
-      const pool = await getPool();
+      const pool = await getWavePool();
       await pool.request().query("SELECT 1 AS ok");
       res.json({ status: "ok", db: "up" });
     } catch (err) {
@@ -441,12 +681,92 @@ app.get(
   })
 );
 
-// ------------------------- Employees -------------------------
+// ----------------------------------------------------------------------------
+// Session endpoints (WAVE reads DIGI cookies)
+// ----------------------------------------------------------------------------
+app.get(
+  "/api/session",
+  requireAuth,
+  requireWaveApp,
+  asyncHandler(async (req, res) => {
+    const email = String(req.user.email || "").toLowerCase();
+    const wavePool = await getWavePool();
 
+    const emp = await wavePool
+      .request()
+      .input("email", sql.NVarChar(255), email)
+      .query(
+        "SELECT TOP 1 empid, empemail, empname, dept, subdept, emplocation, designation, activeflag, managerid FROM Employees WHERE empemail=@email"
+      );
+
+    res.json({
+      user: {
+        id: String(req.user.sub || email),
+        email,
+        roles: req.user.roles || [],
+        apps: req.user.apps || [],
+      },
+      employee: emp.recordset?.[0] || null,
+    });
+  })
+);
+
+app.post(
+  "/auth/refresh",
+  asyncHandler(async (req, res) => {
+    const rt = req.cookies?.sso_refresh;
+    if (!rt) return res.status(401).json({ error: "no_refresh" });
+
+    try {
+      const payload = jwt.verify(rt, AUTH_PUBLIC_KEY, {
+        algorithms: ["RS256"],
+        issuer: ISSUER,
+        audience: AUDIENCE,
+      });
+
+      if (
+        payload.typ !== "refresh" ||
+        !payload.day ||
+        payload.day !== currentIstDay()
+      ) {
+        clearSsoCookies(res);
+        return res.status(401).json({ error: "session_expired_day_change" });
+      }
+
+      // Re-issue using SAME payload (apps/roles are whatever DIGI issued)
+      const user = {
+        sub: payload.sub,
+        email: payload.email,
+        roles: payload.roles || [],
+        apps: payload.apps || [],
+      };
+
+      const { access, refresh } = issueTokens(user);
+      setSsoCookies(req, res, access, refresh);
+      return res.json({ ok: true });
+    } catch (e) {
+      return res.status(401).json({ error: "invalid_refresh" });
+    }
+  })
+);
+
+app.post("/auth/logout", (req, res) => {
+  clearSsoCookies(res);
+  res.json({ ok: true });
+});
+
+// ----------------------------------------------------------------------------
+// Protect everything else in /api (must be authenticated AND have wave app access)
+// ----------------------------------------------------------------------------
+app.use("/api", requireAuth, requireWaveApp);
+
+// ----------------------------------------------------------------------------
+// Employees (now protected)
+// ----------------------------------------------------------------------------
 app.get(
   "/api/employees",
   asyncHandler(async (req, res) => {
-    const pool = await getPool();
+    const pool = await getWavePool();
     const result = await pool
       .request()
       .query(
@@ -460,10 +780,10 @@ app.get(
   "/api/employees/email/:email",
   asyncHandler(async (req, res) => {
     const { email } = req.params;
-    const pool = await getPool();
+    const pool = await getWavePool();
     const result = await pool
       .request()
-      .input("email", sql.NVarChar(255), email)
+      .input("email", sql.NVarChar(255), String(email).toLowerCase())
       .query(
         "SELECT TOP 1 empid, empemail, empname, dept, subdept, emplocation, designation, activeflag, managerid FROM Employees WHERE empemail = @email"
       );
@@ -479,7 +799,7 @@ app.get(
   "/api/employees/id/:empid",
   asyncHandler(async (req, res) => {
     const { empid } = req.params;
-    const pool = await getPool();
+    const pool = await getWavePool();
     const result = await pool
       .request()
       .input("empid", sql.NVarChar(50), empid)
@@ -494,10 +814,11 @@ app.get(
   })
 );
 
-// ------------------------- Visit Requests -------------------------
-
+// ----------------------------------------------------------------------------
+// Requests hydration helpers (unchanged)
+// ----------------------------------------------------------------------------
 async function fetchHydratedRequests(filterTicketNumber = null) {
-  const pool = await getPool();
+  const pool = await getWavePool();
 
   const request = pool.request();
   let requestsSql = `
@@ -526,8 +847,6 @@ async function fetchHydratedRequests(filterTicketNumber = null) {
       vr.currentApproverIndex,
       vr.vehicleNumber,
       vr.visitorTagNumber,
-
-      -- ✅ New plant fields
       vr.plantSite,
       vr.plantArea,
       vr.plantAreaOther
@@ -560,15 +879,13 @@ async function fetchHydratedRequests(filterTicketNumber = null) {
     ]);
 
   const employeesById = new Map();
-  for (const emp of employeesResult.recordset) {
+  for (const emp of employeesResult.recordset)
     employeesById.set(emp.empid, emp);
-  }
 
   const guestsByTicket = new Map();
   for (const g of guestsResult.recordset) {
-    if (!guestsByTicket.has(g.ticketNumber)) {
+    if (!guestsByTicket.has(g.ticketNumber))
       guestsByTicket.set(g.ticketNumber, []);
-    }
     guestsByTicket.get(g.ticketNumber).push({
       name: g.name,
       number: g.number,
@@ -585,9 +902,8 @@ async function fetchHydratedRequests(filterTicketNumber = null) {
 
   const approvalsByTicket = new Map();
   for (const a of approvalsResult.recordset) {
-    if (!approvalsByTicket.has(a.ticketNumber)) {
+    if (!approvalsByTicket.has(a.ticketNumber))
       approvalsByTicket.set(a.ticketNumber, []);
-    }
     approvalsByTicket.get(a.ticketNumber).push({
       approverId: a.approverId,
       approverEmail: a.approverEmail,
@@ -598,7 +914,7 @@ async function fetchHydratedRequests(filterTicketNumber = null) {
     });
   }
 
-  const hydrated = requestsResult.recordset.map((r) => {
+  return requestsResult.recordset.map((r) => {
     const empDetails = employeesById.get(r.empid) || null;
     const guests = guestsByTicket.get(r.ticketNumber) || [];
     const approvals = approvalsByTicket.get(r.ticketNumber) || [];
@@ -624,34 +940,25 @@ async function fetchHydratedRequests(filterTicketNumber = null) {
       cellLineVisit: r.cellLineVisit ? true : false,
       anythingElse: r.anythingElse || undefined,
       attachments: r.attachments ? JSON.parse(r.attachments) : undefined,
-      _creationDatetime: toIsoOrNull(r.creationDatetime),
-      get creationDatetime() {
-        return this._creationDatetime;
-      },
-      set creationDatetime(value) {
-        this._creationDatetime = value;
-      },
+      creationDatetime: toIsoOrNull(r.creationDatetime),
       status: r.status,
       approvals,
       currentApproverIndex: r.currentApproverIndex,
       vehicleNumber: r.vehicleNumber || undefined,
       visitorTagNumber: r.visitorTagNumber || undefined,
-
-      // ✅ expose plant fields to frontend (optional)
       plantSite: r.plantSite || undefined,
       plantArea: r.plantArea || undefined,
       plantAreaOther: r.plantAreaOther || undefined,
     };
   });
-
-  return hydrated;
 }
 
-// ------------------------- WhatsApp Notifications -------------------------
-
+// ----------------------------------------------------------------------------
+// WhatsApp notification helper (unchanged)
+// ----------------------------------------------------------------------------
 async function notifyGuestsOnApproval(ticketNumber) {
   try {
-    const pool = await getPool();
+    const pool = await getWavePool();
 
     const guestsResult = await pool
       .request()
@@ -667,12 +974,7 @@ async function notifyGuestsOnApproval(ticketNumber) {
         "SELECT locationToVisit, tentativeArrival, meetingWith FROM VisitRequests WHERE ticketNumber = @ticketNumber"
       );
 
-    if (reqResult.recordset.length === 0) {
-      console.warn(
-        `[WhatsApp] No VisitRequest found for ticket ${ticketNumber}`
-      );
-      return;
-    }
+    if (reqResult.recordset.length === 0) return;
 
     const vr = reqResult.recordset[0];
     const dateStr = vr.tentativeArrival
@@ -689,15 +991,10 @@ async function notifyGuestsOnApproval(ticketNumber) {
       if (!g.number) continue;
 
       let phone = String(g.number).trim();
-
       if (!phone.startsWith("+")) {
         phone = phone.replace(/\s+/g, "");
-        if (phone.startsWith("0")) {
-          phone = phone.replace(/^0+/, "");
-        }
-        if (!phone.startsWith("91")) {
-          phone = "91" + phone;
-        }
+        if (phone.startsWith("0")) phone = phone.replace(/^0+/, "");
+        if (!phone.startsWith("91")) phone = "91" + phone;
         phone = "+" + phone;
       }
 
@@ -722,21 +1019,20 @@ async function notifyGuestsOnApproval(ticketNumber) {
         "_"
       )}-${ticketNumber}`;
 
-      if (g.qrCode) {
-        await sendWhatsAppTextWithQr(phone, msg, g.qrCode, label);
-      } else {
-        await sendWhatsAppText(phone, msg);
-      }
+      if (g.qrCode) await sendWhatsAppTextWithQr(phone, msg, g.qrCode, label);
+      else await sendWhatsAppText(phone, msg);
     }
   } catch (err) {
     console.error(
       `[WhatsApp] notifyGuestsOnApproval error for ${ticketNumber}:`,
-      err && err.message ? err.message : err
+      err?.message || err
     );
   }
 }
 
-// Get all visit requests
+// ----------------------------------------------------------------------------
+// Requests routes (unchanged, but now protected by /api middleware)
+// ----------------------------------------------------------------------------
 app.get(
   "/api/requests",
   asyncHandler(async (req, res) => {
@@ -745,20 +1041,17 @@ app.get(
   })
 );
 
-// Get single visit request
 app.get(
   "/api/requests/:ticketNumber",
   asyncHandler(async (req, res) => {
     const { ticketNumber } = req.params;
     const data = await fetchHydratedRequests(ticketNumber);
-    if (data.length === 0) {
+    if (data.length === 0)
       return res.status(404).json({ error: "Request not found" });
-    }
     res.json({ data: data[0] });
   })
 );
 
-// Upsert a visit request
 app.post(
   "/api/requests",
   asyncHandler(async (req, res) => {
@@ -778,9 +1071,8 @@ app.post(
     const ticketNumber = String(body.ticketNumber);
     const empid = String(body.empDetails.empid);
 
-    const pool = await getPool();
+    const pool = await getWavePool();
 
-    // Previous status lookup (WhatsApp hook)
     let previousStatus = null;
     try {
       const existing = await pool
@@ -789,19 +1081,11 @@ app.post(
         .query(
           "SELECT TOP 1 status FROM VisitRequests WHERE ticketNumber = @ticketNumber"
         );
-      if (existing.recordset.length > 0) {
+      if (existing.recordset.length > 0)
         previousStatus = existing.recordset[0].status;
-      }
-    } catch (e) {
-      console.error(
-        "[/api/requests] Failed to read previous status:",
-        e && e.message ? e.message : e
-      );
-    }
+    } catch {}
 
-    // ✅ Derive plant fields if frontend hasn't started sending them yet
     const derivedPlant = derivePlantFieldsFromLocation(body.locationToVisit);
-
     const plantSite = body.plantSite || derivedPlant.plantSite || null;
     const plantArea = body.plantArea || derivedPlant.plantArea || null;
     const plantAreaOther =
@@ -812,7 +1096,6 @@ app.post(
     try {
       await tx.begin();
 
-      // Upsert VisitRequests
       const req1 = new sql.Request(tx);
       req1
         .input("ticketNumber", sql.NVarChar(50), ticketNumber)
@@ -885,7 +1168,6 @@ app.post(
           sql.NVarChar(100),
           body.visitorTagNumber || null
         )
-        // ✅ New Plant fields
         .input("plantSite", sql.NVarChar(10), plantSite)
         .input("plantArea", sql.NVarChar(255), plantArea)
         .input("plantAreaOther", sql.NVarChar(255), plantAreaOther);
@@ -925,68 +1207,29 @@ END
 ELSE
 BEGIN
   INSERT INTO VisitRequests (
-    ticketNumber,
-    empid,
-    visitorCategory,
-    visitorCategoryOther,
-    numberOfGuests,
-    purposeOfVisit,
-    tentativeArrival,
-    tentativeDuration,
-    vehicleRequired,
-    vehicleNumber,
-    lunchRequired,
-    lunchCategory,
-    dietaryRequirements,
-    meetingWith,
-    typeOfLocation,
-    locationToVisit,
-    areaToVisit,
-    cellLineVisit,
-    anythingElse,
-    attachments,
-    creationDatetime,
-    status,
-    currentApproverIndex,
-    visitorTagNumber,
-    plantSite,
-    plantArea,
-    plantAreaOther
+    ticketNumber, empid, visitorCategory, visitorCategoryOther, numberOfGuests,
+    purposeOfVisit, tentativeArrival, tentativeDuration,
+    vehicleRequired, vehicleNumber,
+    lunchRequired, lunchCategory, dietaryRequirements,
+    meetingWith, typeOfLocation, locationToVisit, areaToVisit,
+    cellLineVisit, anythingElse, attachments, creationDatetime,
+    status, currentApproverIndex, visitorTagNumber,
+    plantSite, plantArea, plantAreaOther
   )
   VALUES (
-    @ticketNumber,
-    @empid,
-    @visitorCategory,
-    @visitorCategoryOther,
-    @numberOfGuests,
-    @purposeOfVisit,
-    @tentativeArrival,
-    @tentativeDuration,
-    @vehicleRequired,
-    @vehicleNumber,
-    @lunchRequired,
-    @lunchCategory,
-    @dietaryRequirements,
-    @meetingWith,
-    @typeOfLocation,
-    @locationToVisit,
-    @areaToVisit,
-    @cellLineVisit,
-    @anythingElse,
-    @attachments,
-    @creationDatetime,
-    @status,
-    @currentApproverIndex,
-    @visitorTagNumber,
-    @plantSite,
-    @plantArea,
-    @plantAreaOther
+    @ticketNumber, @empid, @visitorCategory, @visitorCategoryOther, @numberOfGuests,
+    @purposeOfVisit, @tentativeArrival, @tentativeDuration,
+    @vehicleRequired, @vehicleNumber,
+    @lunchRequired, @lunchCategory, @dietaryRequirements,
+    @meetingWith, @typeOfLocation, @locationToVisit, @areaToVisit,
+    @cellLineVisit, @anythingElse, @attachments, @creationDatetime,
+    @status, @currentApproverIndex, @visitorTagNumber,
+    @plantSite, @plantArea, @plantAreaOther
   );
 END;
 `;
       await req1.query(upsertVisitSql);
 
-      // Replace Guests for this ticketNumber
       const delGuestsReq = new sql.Request(tx);
       await delGuestsReq
         .input("ticketNumber", sql.NVarChar(50), ticketNumber)
@@ -1017,41 +1260,19 @@ END;
             )
             .input("picture", sql.NVarChar(sql.MAX), g.picture || null);
 
-          const insertGuestSql = `
+          await gr.query(`
             INSERT INTO Guests (
-              ticketNumber,
-              guestIndex,
-              name,
-              number,
-              email,
-              company,
-              designation,
-              qrCode,
-              checkedIn,
-              checkInTime,
-              checkOutTime,
-              picture
+              ticketNumber, guestIndex, name, number, email, company, designation,
+              qrCode, checkedIn, checkInTime, checkOutTime, picture
             )
             VALUES (
-              @ticketNumber,
-              @guestIndex,
-              @name,
-              @number,
-              @email,
-              @company,
-              @designation,
-              @qrCode,
-              @checkedIn,
-              @checkInTime,
-              @checkOutTime,
-              @picture
+              @ticketNumber, @guestIndex, @name, @number, @email, @company, @designation,
+              @qrCode, @checkedIn, @checkInTime, @checkOutTime, @picture
             );
-          `;
-          await gr.query(insertGuestSql);
+          `);
         }
       }
 
-      // Replace Approvals for this ticketNumber
       const delApprovalsReq = new sql.Request(tx);
       await delApprovalsReq
         .input("ticketNumber", sql.NVarChar(50), ticketNumber)
@@ -1076,41 +1297,22 @@ END;
               a.allottedPerson || null
             );
 
-          const insertApprovalSql = `
-INSERT INTO Approvals (
-  ticketNumber,
-  approverId,
-  approverEmail,
-  status,
-  [timestamp],
-  reason,
-  allottedPerson
-)
-VALUES (
-  @ticketNumber,
-  @approverId,
-  @approverEmail,
-  @status,
-  @timestamp,
-  @reason,
-  @allottedPerson
-);
-`;
-          await ar.query(insertApprovalSql);
+          await ar.query(`
+            INSERT INTO Approvals (
+              ticketNumber, approverId, approverEmail, status, [timestamp], reason, allottedPerson
+            )
+            VALUES (
+              @ticketNumber, @approverId, @approverEmail, @status, @timestamp, @reason, @allottedPerson
+            );
+          `);
         }
       }
 
       await tx.commit();
 
       const newStatus = body.status || "pending";
-
       if (newStatus === "approved" && previousStatus !== "approved") {
-        notifyGuestsOnApproval(ticketNumber).catch((err) => {
-          console.error(
-            "[/api/requests] WhatsApp notify error:",
-            err && err.message ? err.message : err
-          );
-        });
+        notifyGuestsOnApproval(ticketNumber).catch(() => {});
       }
 
       const [saved] = await fetchHydratedRequests(ticketNumber);
@@ -1123,13 +1325,14 @@ VALUES (
   })
 );
 
-// ------------------------- History Entries -------------------------
-
+// ----------------------------------------------------------------------------
+// History routes (unchanged, protected)
+// ----------------------------------------------------------------------------
 app.get(
   "/api/history/:ticketNumber",
   asyncHandler(async (req, res) => {
     const { ticketNumber } = req.params;
-    const pool = await getPool();
+    const pool = await getWavePool();
     const result = await pool
       .request()
       .input("ticketNumber", sql.NVarChar(50), ticketNumber)
@@ -1167,7 +1370,7 @@ app.post(
       return res.status(400).json({ error: "Invalid history payload" });
     }
 
-    const pool = await getPool();
+    const pool = await getWavePool();
     const r = pool.request();
     r.input("ticketNumber", sql.NVarChar(50), body.ticketNumber)
       .input("userId", sql.NVarChar(50), body.userId)
@@ -1181,89 +1384,67 @@ app.post(
         body.timestamp ? new Date(body.timestamp) : new Date()
       );
 
-    const insertHistorySql = `
-INSERT INTO HistoryEntries (
-  ticketNumber,
-  userId,
-  comment,
-  actionType,
-  beforeState,
-  afterState,
-  [timestamp]
-)
-VALUES (
-  @ticketNumber,
-  @userId,
-  @comment,
-  @actionType,
-  @beforeState,
-  @afterState,
-  @timestamp
-);
-`;
-    await r.query(insertHistorySql);
+    await r.query(`
+      INSERT INTO HistoryEntries (
+        ticketNumber, userId, comment, actionType, beforeState, afterState, [timestamp]
+      )
+      VALUES (
+        @ticketNumber, @userId, @comment, @actionType, @beforeState, @afterState, @timestamp
+      );
+    `);
+
     res.status(201).json({ success: true });
   })
 );
 
-// ------------------------- Guest lookup by phone number -------------------------
-
+// ----------------------------------------------------------------------------
+// Guest lookup by phone (unchanged, protected)
+// ----------------------------------------------------------------------------
 app.get(
   "/api/guests/by-number/:number",
   asyncHandler(async (req, res) => {
     const raw = req.params.number || "";
     const digitsOnly = raw.replace(/\D/g, "");
-
-    if (!digitsOnly || digitsOnly.length < 6) {
+    if (!digitsOnly || digitsOnly.length < 6)
       return res.status(400).json({ error: "Invalid phone number" });
-    }
 
     const last10 = digitsOnly.slice(-10);
+    const pool = await getWavePool();
 
-    const pool = await getPool();
     const result = await pool
       .request()
       .input("last10", sql.NVarChar(10), last10).query(`
-        SELECT TOP 1
-          name,
-          number,
-          email,
-          company,
-          designation,
-          picture
-        FROM Guests
-        WHERE RIGHT(
-          REPLACE(REPLACE(REPLACE(number, '+', ''), ' ', ''), '-', ''),
-          10
-        ) = @last10
-        ORDER BY id DESC;
+        SELECT TOP 1 name, number, email, company, designation, picture
+          FROM Guests
+         WHERE RIGHT(REPLACE(REPLACE(REPLACE(number, '+', ''), ' ', ''), '-', ''), 10) = @last10
+         ORDER BY id DESC;
       `);
 
-    if (result.recordset.length === 0) {
+    if (result.recordset.length === 0)
       return res.status(404).json({ error: "Guest not found" });
-    }
-
     res.json({ data: result.recordset[0] });
   })
 );
 
 // ----------------------------------------------------------------------------
-// Static SPA hosting - serves built frontend from ../dist
+// Static SPA hosting (Vite build) with SPA fallback
 // ----------------------------------------------------------------------------
-
 const STATIC_DIR = path.resolve(__dirname, "../dist");
+const INDEX_HTML = path.join(STATIC_DIR, "index.html");
+
 if (fs.existsSync(STATIC_DIR)) {
   app.use(express.static(STATIC_DIR));
 
-  app.get("/", (req, res) => {
-    res.sendFile(path.join(STATIC_DIR, "index.html"));
+  app.use((req, res, next) => {
+    if (req.path.startsWith("/api/") || req.path.startsWith("/auth/"))
+      return next();
+    return res.sendFile(INDEX_HTML);
   });
 }
 
 // ----------------------------------------------------------------------------
-// HTTPS options (same certs as your snippet)
+// HTTPS options (unchanged from your current WAVE setup)
 // ----------------------------------------------------------------------------
-
 const httpsOptions = {
   key: fs.readFileSync(path.join(__dirname, "certs", "mydomain.key")),
   cert: fs.readFileSync(path.join(__dirname, "certs", "d466aacf3db3f299.crt")),
@@ -1273,7 +1454,6 @@ const httpsOptions = {
 // ----------------------------------------------------------------------------
 // Global Error Handler
 // ----------------------------------------------------------------------------
-
 app.use((err, req, res, next) => {
   console.error("[Error] Unhandled:", err);
   if (res.headersSent) return next(err);
@@ -1283,12 +1463,19 @@ app.use((err, req, res, next) => {
 // ----------------------------------------------------------------------------
 // Start HTTPS Server (only after DB init)
 // ----------------------------------------------------------------------------
-
 let httpsServer;
 
 async function start() {
   try {
     await initDb();
+
+    // Periodic EMP sync (keeps WAVE aligned with DIGI employee master)
+    setInterval(() => {
+      syncEmployeesFromSpot().catch((e) =>
+        console.error("[EMP Sync] periodic failed:", e?.message || e)
+      );
+    }, 6 * 60 * 60 * 1000);
+
     httpsServer = https
       .createServer(httpsOptions, app)
       .listen(PORT, HOST, () => {
@@ -1296,6 +1483,9 @@ async function start() {
           `🔒  HTTPS ready → https://${
             HOST === "0.0.0.0" ? "localhost" : HOST
           }:${PORT}`
+        );
+        console.log(
+          `✅  SSO enabled. Unauthed users should login via: ${DIGI_ORIGIN}/login`
         );
       });
   } catch (err) {
@@ -1310,26 +1500,28 @@ start();
 async function shutdown(signal) {
   console.log(`Received ${signal}, shutting down...`);
   try {
-    if (httpsServer) {
-      await new Promise((resolve) => httpsServer.close(resolve));
-    }
+    if (httpsServer) await new Promise((resolve) => httpsServer.close(resolve));
   } catch (e) {
     console.error("Error closing HTTPS server:", e);
   }
 
-  if (poolPromise) {
-    try {
-      const pool = await poolPromise;
+  try {
+    if (wavePoolPromise) {
+      const pool = await wavePoolPromise;
       await pool.close();
-    } catch (e) {
-      console.error("Error closing DB pool:", e);
     }
-  }
+  } catch {}
+  try {
+    if (spotPoolPromise) {
+      const pool = await spotPoolPromise;
+      await pool.close();
+    }
+  } catch {}
+
   process.exit(0);
 }
 
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 
-// Export for testing if needed
 module.exports = app;

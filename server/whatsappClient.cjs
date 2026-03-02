@@ -9,11 +9,24 @@ let isReady = false;
 
 const client = new Client({
   authStrategy: new LocalAuth({
-    clientId: "wave-whatsapp", // persists session in .wwebjs_auth
+    clientId: "wave-whatsapp",
   }),
+  webVersionCache: {
+    type: "remote",
+    remotePath:
+      "https://raw.githubusercontent.com/nicaea-hw/nicaea-wa-versions/main/html/2.2412.54.html",
+  },
   puppeteer: {
     headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--disable-extensions",
+      "--disable-software-rasterizer",
+      "--no-first-run",
+    ],
   },
 });
 
@@ -27,17 +40,21 @@ client.on("qr", (qr) => {
   qrcode.generate(qr, { small: true });
 });
 
-client.on("ready", () => {
-  isReady = true;
-  console.log("[WhatsApp] Client is ready and logged in.");
+client.on("loading_screen", (percent, message) => {
+  console.log(`[WhatsApp] Loading: ${percent}% – ${message}`);
 });
 
 client.on("authenticated", () => {
-  console.log("[WhatsApp] Authenticated.");
+  console.log("[WhatsApp] Authenticated. Waiting for ready...");
+});
+
+client.on("ready", () => {
+  isReady = true;
+  console.log("[WhatsApp] ✅ Client is ready and logged in.");
 });
 
 client.on("auth_failure", (msg) => {
-  console.error("[WhatsApp] Auth failure:", msg);
+  console.error("[WhatsApp] ❌ Auth failure:", msg);
 });
 
 client.on("disconnected", (reason) => {
@@ -45,8 +62,14 @@ client.on("disconnected", (reason) => {
   console.warn("[WhatsApp] Disconnected:", reason);
 });
 
-// Initialize immediately when this module is loaded
-client.initialize();
+// Initialize WITH error handling (was fire-and-forget before)
+client.initialize().catch((err) => {
+  console.error(
+    "[WhatsApp] ❌ client.initialize() failed:",
+    err && err.message ? err.message : err
+  );
+  console.error("[WhatsApp] Full error:", err);
+});
 
 /**
  * LOW-LEVEL: send plain text only.
