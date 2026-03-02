@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import Layout from "@/components/Layout";
+import ScrollReveal from "@/components/ScrollReveal";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -251,12 +252,19 @@ const SWAVEDetail = () => {
 
   const canApprove = isApprover(request, currentUser.empemail);
   const fullyApproved = isFullyApproved(request);
+  const currentUserEmail = String(currentUser.empemail || "").toLowerCase();
+  const typeTokens = String(request.typeOfLocation || "")
+    .split(",")
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean);
+  const hasPlant = typeTokens.includes("plant");
+  const chandraEmail = "chandra.kumar@premierenergies.com";
+  const salujaEmail = "saluja@premierenergies.com";
 
   // Check if current user is final approver for plant visit
   const isFinalPlantApprover =
-    request.typeOfLocation === "Plant" &&
-    (currentUser.empemail === "chandra.kumar@premierenergies.com" ||
-      currentUser.empemail === "saluja@premierenergies.com") &&
+    hasPlant &&
+    (currentUserEmail === chandraEmail || currentUserEmail === salujaEmail) &&
     canApprove;
 
   const handleApprove = () => {
@@ -310,7 +318,7 @@ const SWAVEDetail = () => {
 
     // Allotted person (only relevant for final plant approver)
     const previousApprovalForUser = request.approvals.find(
-      (a) => a.approverEmail === currentUser.empemail
+      (a) => String(a.approverEmail || "").toLowerCase() === currentUserEmail
     );
     const oldAllottedPerson = previousApprovalForUser?.allottedPerson || "";
     const newAllottedPerson =
@@ -325,7 +333,7 @@ const SWAVEDetail = () => {
     }
 
     const updatedApprovals = request.approvals.map((approval) =>
-      approval.approverEmail === currentUser.empemail
+      String(approval.approverEmail || "").toLowerCase() === currentUserEmail
         ? {
             ...approval,
             status: "approved" as const,
@@ -337,7 +345,39 @@ const SWAVEDetail = () => {
         : approval
     );
 
-    const allApproved = updatedApprovals.every((a) => a.status === "approved");
+    // Cell-line workflow: either Chandra or Saluja can approve.
+    // If one approves, auto-satisfy the other to keep the request flowing.
+    const hasCellLineEitherPair =
+      updatedApprovals.some(
+        (a) => String(a.approverEmail || "").toLowerCase() === chandraEmail
+      ) &&
+      updatedApprovals.some(
+        (a) => String(a.approverEmail || "").toLowerCase() === salujaEmail
+      );
+
+    let approvalsAfterEitherLogic = updatedApprovals;
+    if (
+      hasCellLineEitherPair &&
+      (currentUserEmail === chandraEmail || currentUserEmail === salujaEmail)
+    ) {
+      approvalsAfterEitherLogic = updatedApprovals.map((approval) =>
+        approval.approverEmail !== currentUserEmail &&
+        (String(approval.approverEmail || "").toLowerCase() === chandraEmail ||
+          String(approval.approverEmail || "").toLowerCase() === salujaEmail) &&
+        approval.status === "pending"
+          ? {
+              ...approval,
+              status: "approved" as const,
+              timestamp: new Date().toISOString(),
+              reason: approval.reason || "Approved via either-approver workflow",
+            }
+          : approval
+      );
+    }
+
+    const allApproved = approvalsAfterEitherLogic.every(
+      (a) => a.status === "approved"
+    );
 
     const updatedRequest = {
       ...request,
@@ -346,7 +386,7 @@ const SWAVEDetail = () => {
       lunchCategory: newLunchRequired ? lunchCategory : undefined,
       dietaryRequirements: newLunchRequired ? dietaryRequirements : undefined,
       vehicleRequired: newVehicleRequired,
-      approvals: updatedApprovals,
+      approvals: approvalsAfterEitherLogic,
       status: allApproved ? ("approved" as const) : ("pending" as const),
     };
 
@@ -390,7 +430,7 @@ const SWAVEDetail = () => {
     }
 
     const updatedApprovals = request.approvals.map((approval) =>
-      approval.approverEmail === currentUser.empemail
+      String(approval.approverEmail || "").toLowerCase() === currentUserEmail
         ? {
             ...approval,
             status: "declined" as const,
@@ -430,43 +470,45 @@ const SWAVEDetail = () => {
 
   return (
     <Layout>
-      <div className="max-w-6xl mx-auto space-y-6">
+      <div className="w-full space-y-6">
         {/* Header */}
-        <Card className="border-none shadow-soft bg-gradient-primary text-primary-foreground">
-          <CardHeader>
-            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-              <div>
-                <CardTitle className="text-2xl font-mono">
-                  {request.ticketNumber}
-                </CardTitle>
-                <CardDescription className="text-primary-foreground/80">
-                  Created on{" "}
-                  {new Date(request.creationDatetime).toLocaleDateString(
-                    "en-IN"
-                  )}
-                </CardDescription>
+        <ScrollReveal>
+          <Card className="border-none shadow-soft bg-gradient-primary text-primary-foreground">
+            <CardHeader>
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                <div>
+                  <CardTitle className="text-2xl font-mono">
+                    {request.ticketNumber}
+                  </CardTitle>
+                  <CardDescription className="text-primary-foreground/80">
+                    Created on{" "}
+                    {new Date(request.creationDatetime).toLocaleDateString(
+                      "en-IN"
+                    )}
+                  </CardDescription>
+                </div>
+                {request.status === "approved" && (
+                  <Badge className="bg-success text-success-foreground">
+                    <CheckCircle2 className="h-4 w-4 mr-1" />
+                    Approved
+                  </Badge>
+                )}
+                {request.status === "declined" && (
+                  <Badge className="bg-destructive text-destructive-foreground">
+                    <XCircle className="h-4 w-4 mr-1" />
+                    Declined
+                  </Badge>
+                )}
+                {request.status === "pending" && (
+                  <Badge className="bg-warning text-warning-foreground">
+                    <Clock className="h-4 w-4 mr-1" />
+                    Pending Approval
+                  </Badge>
+                )}
               </div>
-              {request.status === "approved" && (
-                <Badge className="bg-success text-success-foreground">
-                  <CheckCircle2 className="h-4 w-4 mr-1" />
-                  Approved
-                </Badge>
-              )}
-              {request.status === "declined" && (
-                <Badge className="bg-destructive text-destructive-foreground">
-                  <XCircle className="h-4 w-4 mr-1" />
-                  Declined
-                </Badge>
-              )}
-              {request.status === "pending" && (
-                <Badge className="bg-warning text-warning-foreground">
-                  <Clock className="h-4 w-4 mr-1" />
-                  Pending Approval
-                </Badge>
-              )}
-            </div>
-          </CardHeader>
-        </Card>
+            </CardHeader>
+          </Card>
+        </ScrollReveal>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Main Details */}

@@ -1,5 +1,6 @@
 import { useState, useMemo, useRef } from "react";
 import Layout from "@/components/Layout";
+import ScrollReveal from "@/components/ScrollReveal";
 import {
   Card,
   CardContent,
@@ -590,17 +591,19 @@ const Security = () => {
     <Layout>
       <div className="space-y-6">
         {/* Header */}
-        <Card className="border-none shadow-soft bg-gradient-primary text-primary-foreground">
-          <CardHeader>
-            <CardTitle className="text-2xl flex items-center gap-2">
-              <Scan className="h-6 w-6" />
-              Security Check-In/Out
-            </CardTitle>
-            <CardDescription className="text-primary-foreground/80">
-              Scan visitor QR codes to manage entry, exit, gate photo and tag
-            </CardDescription>
-          </CardHeader>
-        </Card>
+        <ScrollReveal>
+          <Card className="border-none shadow-soft bg-gradient-primary text-primary-foreground">
+            <CardHeader>
+              <CardTitle className="text-2xl flex items-center gap-2">
+                <Scan className="h-6 w-6" />
+                Security Check-In/Out
+              </CardTitle>
+              <CardDescription className="text-primary-foreground/80">
+                Scan visitor QR codes to manage entry, exit, gate photo and tag
+              </CardDescription>
+            </CardHeader>
+          </Card>
+        </ScrollReveal>
 
         {/* Hidden camera/file input */}
         <input

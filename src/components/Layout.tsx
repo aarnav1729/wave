@@ -1,4 +1,3 @@
-// Layout.tsx
 import { useLocation, useNavigate } from "react-router-dom";
 import { NavLink } from "./NavLink";
 import { Button } from "./ui/button";
@@ -8,6 +7,7 @@ import {
   FileText,
   BarChart3,
   Shield,
+  Settings2,
   LogOut,
 } from "lucide-react";
 import { setCurrentUser, getCurrentUser } from "@/lib/storage";
@@ -35,46 +35,44 @@ const Layout = ({ children }: LayoutProps) => {
     navigate("/login");
   };
 
-  // 🔒 Nav items depend on role
   const navItems = isSecurityUser
-    ? [
-        {
-          path: "/security",
-          icon: Shield,
-          label: "Security",
-        },
-      ]
+    ? [{ path: "/security", icon: Shield, label: "Security" }]
     : [
         { path: "/overview", icon: LayoutDashboard, label: "Overview" },
         { path: "/request", icon: FileText, label: "New Request" },
         { path: "/analytics", icon: BarChart3, label: "Analytics" },
+        { path: "/masters", icon: Settings2, label: "Masters" },
       ];
 
   return (
-    <div className="min-h-screen bg-background">
-      {/* Header */}
-      <header className="sticky top-0 z-50 border-b bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/60">
-        <div className="container mx-auto px-4">
-          <div className="flex h-16 items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className="rounded-lg bg-gradient-primary p-2">
+    <div className="relative min-h-screen bg-background">
+      <div className="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
+        <div className="bg-orb bg-orb-a" />
+        <div className="bg-orb bg-orb-b" />
+        <div className="bg-orb bg-orb-c" />
+        <div className="absolute inset-0 bg-grid-overlay" />
+      </div>
+
+      <header className="sticky top-0 z-50 border-b border-white/20 bg-card/70 backdrop-blur-xl">
+        <div className="w-full px-4 md:px-8 lg:px-10">
+          <div className="flex h-16 items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="rounded-xl bg-gradient-primary p-2.5 shadow-hover">
                 <Waves className="h-6 w-6 text-primary-foreground" />
               </div>
               <div>
-                <h1 className="text-xl font-bold">WAVE</h1>
+                <h1 className="text-xl font-bold tracking-tight">WAVE</h1>
                 <p className="text-xs text-muted-foreground">
                   Welcome & Authenticate Visitor Entry
                 </p>
               </div>
             </div>
 
-            <nav className="hidden md:flex items-center gap-1">
+            <nav className="hidden md:flex items-center gap-2">
               {navItems.map((item) => (
                 <NavLink key={item.path} to={item.path}>
                   <Button
-                    variant={
-                      location.pathname === item.path ? "default" : "ghost"
-                    }
+                    variant={location.pathname === item.path ? "default" : "ghost"}
                     size="sm"
                     className="gap-2"
                   >
@@ -109,21 +107,18 @@ const Layout = ({ children }: LayoutProps) => {
         </div>
       </header>
 
-      {/* Mobile Navigation */}
-      <nav className="md:hidden border-b bg-card">
-        <div className="container mx-auto px-4">
+      <nav className="md:hidden border-b border-white/20 bg-card/70 backdrop-blur-xl">
+        <div className="w-full px-2">
           <div className="flex items-center justify-around py-2">
             {navItems.map((item) => (
               <NavLink key={item.path} to={item.path}>
                 <Button
-                  variant={
-                    location.pathname === item.path ? "default" : "ghost"
-                  }
+                  variant={location.pathname === item.path ? "default" : "ghost"}
                   size="sm"
-                  className="flex-col h-auto py-2 px-3"
+                  className="h-auto flex-col py-2 px-3"
                 >
                   <item.icon className="h-5 w-5" />
-                  <span className="text-xs mt-1">{item.label}</span>
+                  <span className="mt-1 text-xs">{item.label}</span>
                 </Button>
               </NavLink>
             ))}
@@ -131,8 +126,7 @@ const Layout = ({ children }: LayoutProps) => {
         </div>
       </nav>
 
-      {/* Main Content */}
-      <main className="container mx-auto px-4 py-6">{children}</main>
+      <main className="w-full px-4 py-6 md:px-8 lg:px-10">{children}</main>
     </div>
   );
 };

@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import Layout from "@/components/Layout";
+import ScrollReveal from "@/components/ScrollReveal";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -105,14 +106,24 @@ type Employee = {
   activeflag?: number | null;
 };
 
-const OFFICE_LOCATIONS: string[] = [
+type MasterLocation = {
+  id: number;
+  locationType: LocationType;
+  locationName: string;
+  plantSite?: string | null;
+  isCellLine?: boolean | number;
+  activeflag?: boolean | number;
+  displayOrder?: number;
+};
+
+const DEFAULT_OFFICE_LOCATIONS: string[] = [
   "Corporate Office",
   "City Office",
   "Delhi Office",
   "Pune Office",
 ];
 
-const WAREHOUSE_LOCATIONS: string[] = [
+const DEFAULT_WAREHOUSE_LOCATIONS: string[] = [
   "Annaram",
   "Axonify",
   "Bahadurguda",
@@ -217,6 +228,15 @@ const RequestForm = () => {
   const [locationTypes, setLocationTypes] = useState<LocationType[]>([
     "Office",
   ]);
+  const [officeLocations, setOfficeLocations] = useState<string[]>(
+    DEFAULT_OFFICE_LOCATIONS
+  );
+  const [warehouseLocations, setWarehouseLocations] = useState<string[]>(
+    DEFAULT_WAREHOUSE_LOCATIONS
+  );
+  const [selectedOfficeLocation, setSelectedOfficeLocation] = useState("");
+  const [selectedWarehouseLocation, setSelectedWarehouseLocation] =
+    useState("");
 
   // Final flattened selected locations stored as strings
   const [locationsSelected, setLocationsSelected] = useState<string[]>([]);
@@ -275,7 +295,14 @@ const RequestForm = () => {
           .map((t) => t.trim())
           .filter(Boolean);
 
-        setLocationsSelected(parsedLocs);
+        const warehouseEntry =
+          parsedLocs.find((l) => DEFAULT_WAREHOUSE_LOCATIONS.includes(l)) || "";
+        const officeEntry =
+          parsedLocs.find(
+            (l) => !isPlantLocationEntry(l) && l !== warehouseEntry
+          ) || "";
+        setSelectedOfficeLocation(officeEntry);
+        setSelectedWarehouseLocation(warehouseEntry);
 
         // Try best-effort parse for new Plant UI (if a matching entry exists)
         const plantEntry = parsedLocs.find((l) => isPlantLocationEntry(l));
@@ -342,6 +369,43 @@ const RequestForm = () => {
     };
 
     loadEmployees();
+  }, []);
+
+  useEffect(() => {
+    const loadLocationMasters = async () => {
+      try {
+        const res = await fetch("/api/masters/locations", {
+          credentials: "include",
+        });
+        if (!res.ok) return;
+
+        const json = await res.json();
+        const data: MasterLocation[] = Array.isArray(json.data) ? json.data : [];
+
+        const active = data.filter((loc) =>
+          typeof loc.activeflag === "undefined"
+            ? true
+            : loc.activeflag === true || loc.activeflag === 1
+        );
+
+        const office = active
+          .filter((loc) => loc.locationType === "Office")
+          .sort((a, b) => (a.displayOrder || 0) - (b.displayOrder || 0))
+          .map((loc) => loc.locationName);
+
+        const warehouse = active
+          .filter((loc) => loc.locationType === "Warehouse")
+          .sort((a, b) => (a.displayOrder || 0) - (b.displayOrder || 0))
+          .map((loc) => loc.locationName);
+
+        if (office.length) setOfficeLocations(office);
+        if (warehouse.length) setWarehouseLocations(warehouse);
+      } catch (err) {
+        console.error("[RequestForm] Failed to load location masters:", err);
+      }
+    };
+
+    loadLocationMasters();
   }, []);
 
   // ------------------------- Guests count sync -------------------------
@@ -418,22 +482,36 @@ const RequestForm = () => {
   }, [plantSite, plantSubArea, plantOtherText]);
 
   useEffect(() => {
-    // If Plant type not selected, ensure plant-derived values are cleared from selected list
     if (!plantSelected) {
-      setLocationsSelected((prev) =>
-        prev.filter((l) => !isPlantLocationEntry(l))
-      );
+      setPlantSite("");
+      setPlantSubArea("");
+      setPlantOtherText("");
       return;
     }
+  }, [plantSelected]);
 
-    setLocationsSelected((prev) => {
-      const withoutPlant = prev.filter((l) => !isPlantLocationEntry(l));
+  useEffect(() => {
+    const nextSelected: string[] = [];
 
-      if (!plantLocationLabel) return withoutPlant;
+    if (officeSelected && selectedOfficeLocation) {
+      nextSelected.push(selectedOfficeLocation);
+    }
+    if (warehouseSelected && selectedWarehouseLocation) {
+      nextSelected.push(selectedWarehouseLocation);
+    }
+    if (plantSelected && plantLocationLabel) {
+      nextSelected.push(plantLocationLabel);
+    }
 
-      return Array.from(new Set([...withoutPlant, plantLocationLabel]));
-    });
-  }, [plantSelected, plantLocationLabel]);
+    setLocationsSelected(nextSelected);
+  }, [
+    officeSelected,
+    warehouseSelected,
+    plantSelected,
+    selectedOfficeLocation,
+    selectedWarehouseLocation,
+    plantLocationLabel,
+  ]);
 
   // Reset sub-area when site changes
   useEffect(() => {
@@ -487,23 +565,18 @@ const RequestForm = () => {
           setPlantSite("");
           setPlantSubArea("");
           setPlantOtherText("");
+        }
 
-          setLocationsSelected((locPrev) =>
-            locPrev.filter((l) => !isPlantLocationEntry(l))
-          );
+        if (type === "Office" && !next.includes("Office")) {
+          setSelectedOfficeLocation("");
+        }
+
+        if (type === "Warehouse" && !next.includes("Warehouse")) {
+          setSelectedWarehouseLocation("");
         }
 
         return next;
       }
-    });
-  };
-
-  const toggleLocation = (loc: string, checked: boolean) => {
-    setLocationsSelected((prev) => {
-      if (checked) {
-        return Array.from(new Set([...prev, loc]));
-      }
-      return prev.filter((l) => l !== loc);
     });
   };
 
@@ -596,6 +669,12 @@ const RequestForm = () => {
     if (!currentUser) return;
 
     const durationNumber = parseFloat(tentativeDuration);
+    const hasOfficeSelection = !officeSelected || !!selectedOfficeLocation;
+    const hasWarehouseSelection =
+      !warehouseSelected || !!selectedWarehouseLocation;
+    const hasPlantSelection = !plantSelected || !!plantLocationLabel;
+    const hasAllRequiredTypeSelections =
+      hasOfficeSelection && hasWarehouseSelection && hasPlantSelection;
 
     const guestErrors: GuestError[] = guests.map((g) => ({
       name: !g.name.trim(),
@@ -614,7 +693,8 @@ const RequestForm = () => {
         durationNumber <= 0,
       meetingWith: !meetingWith.trim(),
       locationTypes: locationTypes.length === 0,
-      locationsSelected: locationsSelected.length === 0,
+      locationsSelected:
+        locationTypes.length > 0 && !hasAllRequiredTypeSelections,
       areaToVisit: false,
       guests: guestErrors,
     };
@@ -745,8 +825,9 @@ const RequestForm = () => {
   // ------------------------- UI ---------------------------------------------
   return (
     <Layout>
-      <div className="max-w-4xl mx-auto space-y-6">
-        <Card>
+      <div className="w-full space-y-6">
+        <ScrollReveal>
+          <Card>
           <CardHeader>
             <CardTitle className="text-2xl">
               {editTicketNumber ? "Edit Visit Request" : "New Visit Request"}
@@ -1259,22 +1340,21 @@ const RequestForm = () => {
                     <p className="text-xs font-medium text-muted-foreground mb-2">
                       Office
                     </p>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                      {OFFICE_LOCATIONS.map((loc) => (
-                        <label
-                          key={loc}
-                          className="flex items-center gap-2 text-sm cursor-pointer"
-                        >
-                          <Checkbox
-                            checked={locationsSelected.includes(loc)}
-                            onCheckedChange={(checked) =>
-                              toggleLocation(loc, Boolean(checked))
-                            }
-                          />
-                          <span>{loc}</span>
-                        </label>
-                      ))}
-                    </div>
+                    <Select
+                      value={selectedOfficeLocation || undefined}
+                      onValueChange={setSelectedOfficeLocation}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select one office location" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {officeLocations.map((loc) => (
+                          <SelectItem key={loc} value={loc}>
+                            {loc}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
                 )}
 
@@ -1288,22 +1368,21 @@ const RequestForm = () => {
                     <p className="text-xs font-medium text-muted-foreground mb-2">
                       Warehouse
                     </p>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                      {WAREHOUSE_LOCATIONS.map((loc) => (
-                        <label
-                          key={loc}
-                          className="flex items-center gap-2 text-sm cursor-pointer"
-                        >
-                          <Checkbox
-                            checked={locationsSelected.includes(loc)}
-                            onCheckedChange={(checked) =>
-                              toggleLocation(loc, Boolean(checked))
-                            }
-                          />
-                          <span>{loc}</span>
-                        </label>
-                      ))}
-                    </div>
+                    <Select
+                      value={selectedWarehouseLocation || undefined}
+                      onValueChange={setSelectedWarehouseLocation}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select one warehouse location" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {warehouseLocations.map((loc) => (
+                          <SelectItem key={loc} value={loc}>
+                            {loc}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
                 )}
 
@@ -1498,7 +1577,8 @@ const RequestForm = () => {
               </Button>
             </div>
           </CardContent>
-        </Card>
+          </Card>
+        </ScrollReveal>
       </div>
 
       {/* Vehicle Dialog */}

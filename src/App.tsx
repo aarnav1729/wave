@@ -18,6 +18,7 @@ import RequestForm from "./pages/RequestForm";
 import SWAVEDetail from "./pages/SWAVEDetail";
 import Analytics from "./pages/Analytics";
 import Security from "./pages/Security";
+import Masters from "./pages/Masters";
 import NotFound from "./pages/NotFound";
 
 import {
@@ -288,6 +289,14 @@ const App = () => {
                 element={
                   <ProtectedRoute>
                     <Analytics />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/masters"
+                element={
+                  <ProtectedRoute>
+                    <Masters />
                   </ProtectedRoute>
                 }
               />

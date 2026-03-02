@@ -457,6 +457,39 @@ BEGIN
       FOREIGN KEY (ticketNumber) REFERENCES VisitRequests(ticketNumber)
   );
 END;
+
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'LocationMasters')
+BEGIN
+  CREATE TABLE LocationMasters (
+    id            INT IDENTITY(1,1) PRIMARY KEY,
+    locationType  NVARCHAR(20)  NOT NULL, -- Office | Plant | Warehouse
+    locationName  NVARCHAR(255) NOT NULL,
+    plantSite     NVARCHAR(10)  NULL,
+    isCellLine    BIT           NOT NULL DEFAULT(0),
+    activeflag    BIT           NOT NULL DEFAULT(1),
+    displayOrder  INT           NOT NULL DEFAULT(0),
+    createdAt     DATETIME2     NOT NULL DEFAULT(SYSUTCDATETIME()),
+    updatedAt     DATETIME2     NOT NULL DEFAULT(SYSUTCDATETIME()),
+    CONSTRAINT UQ_LocationMasters_TypeName UNIQUE (locationType, locationName)
+  );
+END;
+
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'WorkflowLocationSets')
+BEGIN
+  CREATE TABLE WorkflowLocationSets (
+    id                 INT IDENTITY(1,1) PRIMARY KEY,
+    setName            NVARCHAR(120) NOT NULL UNIQUE,
+    includeOffice      BIT           NOT NULL DEFAULT(0),
+    includeWarehouse   BIT           NOT NULL DEFAULT(0),
+    includePlant       BIT           NOT NULL DEFAULT(0),
+    requiresManager    BIT           NOT NULL DEFAULT(1),
+    plantApprovalMode  NVARCHAR(20)  NOT NULL DEFAULT('none'), -- none|chandra|either
+    notes              NVARCHAR(500) NULL,
+    activeflag         BIT           NOT NULL DEFAULT(1),
+    createdAt          DATETIME2     NOT NULL DEFAULT(SYSUTCDATETIME()),
+    updatedAt          DATETIME2     NOT NULL DEFAULT(SYSUTCDATETIME())
+  );
+END;
 `;
 
 // ----------------------------------------------------------------------------
@@ -627,8 +660,54 @@ FROM dbo.EMP
 async function initDb() {
   const wavePool = await getWavePool();
   await wavePool.request().batch(INIT_TABLES_SQL);
+  await seedMasters(wavePool);
   await syncEmployeesFromSpot();
   console.log("[DB] Tables ensured + employees synced from SPOT.");
+}
+
+async function seedMasters(pool) {
+  await pool.request().query(`
+    IF NOT EXISTS (SELECT 1 FROM LocationMasters)
+    BEGIN
+      INSERT INTO LocationMasters (locationType, locationName, plantSite, isCellLine, activeflag, displayOrder)
+      VALUES
+        ('Office', 'Corporate Office', NULL, 0, 1, 1),
+        ('Office', 'City Office', NULL, 0, 1, 2),
+        ('Office', 'Delhi Office', NULL, 0, 1, 3),
+        ('Office', 'Pune Office', NULL, 0, 1, 4),
+
+        ('Warehouse', 'Annaram', NULL, 0, 1, 1),
+        ('Warehouse', 'Axonify', NULL, 0, 1, 2),
+        ('Warehouse', 'Bahadurguda', NULL, 0, 1, 3),
+        ('Warehouse', 'Narkhuda', NULL, 0, 1, 4),
+        ('Warehouse', 'Kothur', NULL, 0, 1, 5),
+        ('Warehouse', 'Radiant', NULL, 0, 1, 6),
+        ('Warehouse', 'TGIIC', NULL, 0, 1, 7),
+        ('Warehouse', 'HSTL', NULL, 0, 1, 8),
+
+        ('Plant', 'P2 - Module (PEPPL)', 'P2', 0, 1, 1),
+        ('Plant', 'P2 - MonoPerc Cell (PEPPL)', 'P2', 1, 1, 2),
+        ('Plant', 'P2 - TopCon Cell (PEPPL)', 'P2', 1, 1, 3),
+        ('Plant', 'P3 - Cell (PEIPL)', 'P3', 1, 1, 4),
+        ('Plant', 'P4 - Module (PEIPL)', 'P4', 0, 1, 5),
+        ('Plant', 'P5 - Module (PEGEPL)', 'P5', 0, 1, 6),
+        ('Plant', 'P6 - Module (PEGEPL)', 'P6', 0, 1, 7),
+        ('Plant', 'P7 - Module (PEPPL)', 'P7', 0, 1, 8);
+    END;
+  `);
+
+  await pool.request().query(`
+    IF NOT EXISTS (SELECT 1 FROM WorkflowLocationSets)
+    BEGIN
+      INSERT INTO WorkflowLocationSets (
+        setName, includeOffice, includeWarehouse, includePlant, requiresManager, plantApprovalMode, notes, activeflag
+      )
+      VALUES
+        ('Office/Warehouse Only', 1, 1, 0, 1, 'none', 'Only reporting manager approval is required.', 1),
+        ('Plant (Non Cell Line)', 1, 1, 1, 1, 'chandra', 'If any plant area is included, Chandra approval is required.', 1),
+        ('Plant (Cell Line)', 1, 1, 1, 1, 'either', 'If any cell line is included, either Saluja or Chandra can approve.', 1);
+    END;
+  `);
 }
 
 // ----------------------------------------------------------------------------
@@ -662,6 +741,15 @@ function toIsoOrNull(value) {
   } catch {
     return null;
   }
+}
+
+function toBit(value) {
+  if (typeof value === "boolean") return value ? 1 : 0;
+  if (typeof value === "number") return value ? 1 : 0;
+  const s = String(value || "")
+    .trim()
+    .toLowerCase();
+  return s === "true" || s === "1" || s === "yes" ? 1 : 0;
 }
 
 // ----------------------------------------------------------------------------
@@ -1423,6 +1511,311 @@ app.get(
     if (result.recordset.length === 0)
       return res.status(404).json({ error: "Guest not found" });
     res.json({ data: result.recordset[0] });
+  })
+);
+
+// ----------------------------------------------------------------------------
+// Masters: Locations + Workflow Sets (protected)
+// ----------------------------------------------------------------------------
+app.get(
+  "/api/masters/locations",
+  asyncHandler(async (req, res) => {
+    const pool = await getWavePool();
+    const result = await pool.request().query(`
+      SELECT
+        id, locationType, locationName, plantSite, isCellLine, activeflag, displayOrder, createdAt, updatedAt
+      FROM LocationMasters
+      ORDER BY locationType ASC, displayOrder ASC, locationName ASC
+    `);
+    res.json({ data: result.recordset });
+  })
+);
+
+app.post(
+  "/api/masters/locations",
+  asyncHandler(async (req, res) => {
+    const body = req.body || {};
+    const locationType = String(body.locationType || "").trim();
+    const locationName = String(body.locationName || "").trim();
+    const plantSite = body.plantSite ? String(body.plantSite).trim() : null;
+    const isCellLine = toBit(body.isCellLine);
+    const activeflag = toBit(
+      typeof body.activeflag === "undefined" ? 1 : body.activeflag
+    );
+    const displayOrder = Number.isFinite(Number(body.displayOrder))
+      ? Number(body.displayOrder)
+      : 0;
+
+    if (!["Office", "Plant", "Warehouse"].includes(locationType)) {
+      return res.status(400).json({
+        error: "locationType must be one of: Office, Plant, Warehouse",
+      });
+    }
+    if (!locationName) {
+      return res.status(400).json({ error: "locationName is required" });
+    }
+
+    const pool = await getWavePool();
+    try {
+      const result = await pool
+        .request()
+        .input("locationType", sql.NVarChar(20), locationType)
+        .input("locationName", sql.NVarChar(255), locationName)
+        .input("plantSite", sql.NVarChar(10), plantSite)
+        .input("isCellLine", sql.Bit, isCellLine)
+        .input("activeflag", sql.Bit, activeflag)
+        .input("displayOrder", sql.Int, displayOrder).query(`
+          INSERT INTO LocationMasters (
+            locationType, locationName, plantSite, isCellLine, activeflag, displayOrder, createdAt, updatedAt
+          )
+          OUTPUT INSERTED.*
+          VALUES (
+            @locationType, @locationName, @plantSite, @isCellLine, @activeflag, @displayOrder, SYSUTCDATETIME(), SYSUTCDATETIME()
+          )
+        `);
+      return res.status(201).json({ data: result.recordset[0] });
+    } catch (err) {
+      if (String(err?.message || "").toLowerCase().includes("uq_locationmasters")) {
+        return res.status(409).json({ error: "Location already exists for this type" });
+      }
+      throw err;
+    }
+  })
+);
+
+app.put(
+  "/api/masters/locations/:id",
+  asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ error: "Invalid location id" });
+    }
+
+    const body = req.body || {};
+    const locationType = String(body.locationType || "").trim();
+    const locationName = String(body.locationName || "").trim();
+    const plantSite = body.plantSite ? String(body.plantSite).trim() : null;
+    const isCellLine = toBit(body.isCellLine);
+    const activeflag = toBit(
+      typeof body.activeflag === "undefined" ? 1 : body.activeflag
+    );
+    const displayOrder = Number.isFinite(Number(body.displayOrder))
+      ? Number(body.displayOrder)
+      : 0;
+
+    if (!["Office", "Plant", "Warehouse"].includes(locationType)) {
+      return res.status(400).json({
+        error: "locationType must be one of: Office, Plant, Warehouse",
+      });
+    }
+    if (!locationName) {
+      return res.status(400).json({ error: "locationName is required" });
+    }
+
+    const pool = await getWavePool();
+    const result = await pool
+      .request()
+      .input("id", sql.Int, id)
+      .input("locationType", sql.NVarChar(20), locationType)
+      .input("locationName", sql.NVarChar(255), locationName)
+      .input("plantSite", sql.NVarChar(10), plantSite)
+      .input("isCellLine", sql.Bit, isCellLine)
+      .input("activeflag", sql.Bit, activeflag)
+      .input("displayOrder", sql.Int, displayOrder).query(`
+        UPDATE LocationMasters
+        SET
+          locationType = @locationType,
+          locationName = @locationName,
+          plantSite = @plantSite,
+          isCellLine = @isCellLine,
+          activeflag = @activeflag,
+          displayOrder = @displayOrder,
+          updatedAt = SYSUTCDATETIME()
+        OUTPUT INSERTED.*
+        WHERE id = @id
+      `);
+
+    if (!result.recordset.length) {
+      return res.status(404).json({ error: "Location not found" });
+    }
+    res.json({ data: result.recordset[0] });
+  })
+);
+
+app.delete(
+  "/api/masters/locations/:id",
+  asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ error: "Invalid location id" });
+    }
+    const pool = await getWavePool();
+    const result = await pool
+      .request()
+      .input("id", sql.Int, id)
+      .query("DELETE FROM LocationMasters OUTPUT DELETED.id WHERE id = @id");
+    if (!result.recordset.length) {
+      return res.status(404).json({ error: "Location not found" });
+    }
+    res.json({ success: true });
+  })
+);
+
+app.get(
+  "/api/masters/workflow-sets",
+  asyncHandler(async (req, res) => {
+    const pool = await getWavePool();
+    const result = await pool.request().query(`
+      SELECT
+        id, setName, includeOffice, includeWarehouse, includePlant, requiresManager,
+        plantApprovalMode, notes, activeflag, createdAt, updatedAt
+      FROM WorkflowLocationSets
+      ORDER BY id ASC
+    `);
+    res.json({ data: result.recordset });
+  })
+);
+
+app.post(
+  "/api/masters/workflow-sets",
+  asyncHandler(async (req, res) => {
+    const body = req.body || {};
+    const setName = String(body.setName || "").trim();
+    const includeOffice = toBit(body.includeOffice);
+    const includeWarehouse = toBit(body.includeWarehouse);
+    const includePlant = toBit(body.includePlant);
+    const requiresManager = toBit(
+      typeof body.requiresManager === "undefined" ? 1 : body.requiresManager
+    );
+    const plantApprovalMode = String(body.plantApprovalMode || "none").trim();
+    const notes = body.notes ? String(body.notes).trim() : null;
+    const activeflag = toBit(
+      typeof body.activeflag === "undefined" ? 1 : body.activeflag
+    );
+
+    if (!setName) {
+      return res.status(400).json({ error: "setName is required" });
+    }
+    if (!["none", "chandra", "either"].includes(plantApprovalMode)) {
+      return res
+        .status(400)
+        .json({ error: "plantApprovalMode must be one of: none, chandra, either" });
+    }
+
+    const pool = await getWavePool();
+    try {
+      const result = await pool
+        .request()
+        .input("setName", sql.NVarChar(120), setName)
+        .input("includeOffice", sql.Bit, includeOffice)
+        .input("includeWarehouse", sql.Bit, includeWarehouse)
+        .input("includePlant", sql.Bit, includePlant)
+        .input("requiresManager", sql.Bit, requiresManager)
+        .input("plantApprovalMode", sql.NVarChar(20), plantApprovalMode)
+        .input("notes", sql.NVarChar(500), notes)
+        .input("activeflag", sql.Bit, activeflag).query(`
+          INSERT INTO WorkflowLocationSets (
+            setName, includeOffice, includeWarehouse, includePlant,
+            requiresManager, plantApprovalMode, notes, activeflag, createdAt, updatedAt
+          )
+          OUTPUT INSERTED.*
+          VALUES (
+            @setName, @includeOffice, @includeWarehouse, @includePlant,
+            @requiresManager, @plantApprovalMode, @notes, @activeflag,
+            SYSUTCDATETIME(), SYSUTCDATETIME()
+          )
+        `);
+      return res.status(201).json({ data: result.recordset[0] });
+    } catch (err) {
+      if (String(err?.message || "").toLowerCase().includes("unique")) {
+        return res.status(409).json({ error: "Workflow set name already exists" });
+      }
+      throw err;
+    }
+  })
+);
+
+app.put(
+  "/api/masters/workflow-sets/:id",
+  asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ error: "Invalid workflow set id" });
+    }
+
+    const body = req.body || {};
+    const setName = String(body.setName || "").trim();
+    const includeOffice = toBit(body.includeOffice);
+    const includeWarehouse = toBit(body.includeWarehouse);
+    const includePlant = toBit(body.includePlant);
+    const requiresManager = toBit(
+      typeof body.requiresManager === "undefined" ? 1 : body.requiresManager
+    );
+    const plantApprovalMode = String(body.plantApprovalMode || "none").trim();
+    const notes = body.notes ? String(body.notes).trim() : null;
+    const activeflag = toBit(
+      typeof body.activeflag === "undefined" ? 1 : body.activeflag
+    );
+
+    if (!setName) {
+      return res.status(400).json({ error: "setName is required" });
+    }
+    if (!["none", "chandra", "either"].includes(plantApprovalMode)) {
+      return res
+        .status(400)
+        .json({ error: "plantApprovalMode must be one of: none, chandra, either" });
+    }
+
+    const pool = await getWavePool();
+    const result = await pool
+      .request()
+      .input("id", sql.Int, id)
+      .input("setName", sql.NVarChar(120), setName)
+      .input("includeOffice", sql.Bit, includeOffice)
+      .input("includeWarehouse", sql.Bit, includeWarehouse)
+      .input("includePlant", sql.Bit, includePlant)
+      .input("requiresManager", sql.Bit, requiresManager)
+      .input("plantApprovalMode", sql.NVarChar(20), plantApprovalMode)
+      .input("notes", sql.NVarChar(500), notes)
+      .input("activeflag", sql.Bit, activeflag).query(`
+        UPDATE WorkflowLocationSets
+        SET
+          setName = @setName,
+          includeOffice = @includeOffice,
+          includeWarehouse = @includeWarehouse,
+          includePlant = @includePlant,
+          requiresManager = @requiresManager,
+          plantApprovalMode = @plantApprovalMode,
+          notes = @notes,
+          activeflag = @activeflag,
+          updatedAt = SYSUTCDATETIME()
+        OUTPUT INSERTED.*
+        WHERE id = @id
+      `);
+
+    if (!result.recordset.length) {
+      return res.status(404).json({ error: "Workflow set not found" });
+    }
+    res.json({ data: result.recordset[0] });
+  })
+);
+
+app.delete(
+  "/api/masters/workflow-sets/:id",
+  asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ error: "Invalid workflow set id" });
+    }
+    const pool = await getWavePool();
+    const result = await pool
+      .request()
+      .input("id", sql.Int, id)
+      .query("DELETE FROM WorkflowLocationSets OUTPUT DELETED.id WHERE id = @id");
+    if (!result.recordset.length) {
+      return res.status(404).json({ error: "Workflow set not found" });
+    }
+    res.json({ success: true });
   })
 );
 

@@ -1,5 +1,16 @@
 import { VisitRequest, Approval, Employee, getEmployeeById } from "./storage";
 
+const CHANDRA_EMAIL = "chandra.kumar@premierenergies.com";
+const CHANDRA_ID = "PEPPL0548";
+const SALUJA_EMAIL = "saluja@premierenergies.com";
+const SALUJA_ID = "10000";
+
+const getTypeTokens = (typeOfLocation: string | undefined): string[] =>
+  String(typeOfLocation || "")
+    .split(",")
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean);
+
 // Determine required approvers based on workflow rules
 export const determineApprovers = (
   request: VisitRequest,
@@ -7,21 +18,10 @@ export const determineApprovers = (
 ): Approval[] => {
   const approvals: Approval[] = [];
 
-  // ---- Helper: parse typeOfLocation into a set of normalized tokens ----
-  const rawType = request.typeOfLocation || "";
-  const typeTokens = rawType
-    .split(",")
-    .map((t) => t.trim().toLowerCase())
-    .filter(Boolean);
-
+  const typeTokens = getTypeTokens(request.typeOfLocation);
   const hasPlant = typeTokens.includes("plant");
-  // Warehouse / Office presence not needed for matrix, only Plant matters
-  // const hasWarehouse = typeTokens.includes("warehouse");
-  // const hasOffice = typeTokens.includes("office");
 
-  // -------------------------------------------------------------------
-  // Rule 1: Manager approval always required
-  // -------------------------------------------------------------------
+  // Rule 1: Reporting manager approval is always required.
   if (empDetails.managerid) {
     const manager = getEmployeeById(empDetails.managerid);
     if (manager) {
@@ -33,29 +33,26 @@ export const determineApprovers = (
     }
   }
 
-  // -------------------------------------------------------------------
-  // Rule 2 / 3: Plant + cell-line logic (covers all your combinations)
-  //
-  // - If ANY Plant is selected:
-  //    - cellLineVisit = false  -> RM + Chandra
-  //    - cellLineVisit = true   -> RM + Saluja
-  //
-  // - If NO Plant selected (Office / Warehouse / both):
-  //    -> only RM (no extra approver)
-  // -------------------------------------------------------------------
+  // Rule 2:
+  // - Office only / Warehouse only / Office+Warehouse -> only manager.
+  // - Any plant area included -> manager + Chandra.
+  // - Any cell line included -> manager + both Chandra and Saluja
+  //   (approval treated as "either one can approve" in detail page logic).
+  const hasCellLine =
+    !!request.cellLineVisit ||
+    /\bcell\b/i.test(String(request.locationToVisit || ""));
+
   if (hasPlant) {
-    if (request.cellLineVisit) {
-      // Plant + Cell = Yes -> Saluja
+    approvals.push({
+      approverId: CHANDRA_ID,
+      approverEmail: CHANDRA_EMAIL,
+      status: "pending",
+    });
+
+    if (hasCellLine) {
       approvals.push({
-        approverId: "10000",
-        approverEmail: "saluja@premierenergies.com",
-        status: "pending",
-      });
-    } else {
-      // Plant + Cell = No -> Chandra
-      approvals.push({
-        approverId: "PEPPL0548",
-        approverEmail: "chandra.kumar@premierenergies.com",
+        approverId: SALUJA_ID,
+        approverEmail: SALUJA_EMAIL,
         status: "pending",
       });
     }
@@ -69,9 +66,11 @@ export const isApprover = (
   request: VisitRequest,
   userEmail: string
 ): boolean => {
+  const email = String(userEmail || "").toLowerCase();
   return request.approvals.some(
     (approval) =>
-      approval.approverEmail === userEmail && approval.status === "pending"
+      String(approval.approverEmail || "").toLowerCase() === email &&
+      approval.status === "pending"
   );
 };
 

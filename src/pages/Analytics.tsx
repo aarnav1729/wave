@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import Layout from "@/components/Layout";
+import ScrollReveal from "@/components/ScrollReveal";
 import {
   Card,
   CardContent,
@@ -322,18 +323,20 @@ const Analytics = () => {
     <Layout>
       <div className="space-y-6">
         {/* Header */}
-        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-          <div>
-            <h1 className="text-3xl font-bold">Analytics Dashboard</h1>
-            <p className="text-muted-foreground">
-              Comprehensive visitor request insights
-            </p>
+        <ScrollReveal>
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+            <div>
+              <h1 className="text-3xl font-bold">Analytics Dashboard</h1>
+              <p className="text-muted-foreground">
+                Comprehensive visitor request insights
+              </p>
+            </div>
+            <Button onClick={exportToCSV} className="gap-2">
+              <Download className="h-4 w-4" />
+              Export Data
+            </Button>
           </div>
-          <Button onClick={exportToCSV} className="gap-2">
-            <Download className="h-4 w-4" />
-            Export Data
-          </Button>
-        </div>
+        </ScrollReveal>
 
         {/* Key Metrics (existing) */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">

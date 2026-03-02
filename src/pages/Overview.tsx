@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import Layout from "@/components/Layout";
+import ScrollReveal from "@/components/ScrollReveal";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -136,16 +137,29 @@ const Overview = () => {
     <Layout>
       <div className="space-y-6">
         {/* Welcome Section */}
-        <Card className="border-none shadow-soft bg-gradient-primary text-primary-foreground">
-          <CardHeader>
-            <CardTitle className="text-2xl">
-              Welcome to WAVE, {currentUser?.empname || "User"}!
-            </CardTitle>
-            <CardDescription className="text-primary-foreground/80">
-              Manage visitor requests efficiently and securely
-            </CardDescription>
-          </CardHeader>
-        </Card>
+        <ScrollReveal>
+          <Card className="border-none shadow-soft bg-gradient-primary text-primary-foreground">
+            <CardHeader>
+              <CardTitle className="text-2xl">
+                Welcome to WAVE, {currentUser?.empname || "User"}!
+              </CardTitle>
+              <CardDescription className="text-primary-foreground/80">
+                Manage visitor requests efficiently and securely
+              </CardDescription>
+            </CardHeader>
+          </Card>
+        </ScrollReveal>
+
+        <ScrollReveal delayMs={90}>
+          <Card className="bg-gradient-to-r from-sky-50 to-emerald-50">
+            <CardHeader>
+              <CardTitle className="text-xl">Quick Tutorial</CardTitle>
+              <CardDescription>
+                1. Create request. 2. Track approval. 3. Share guest QR after approval.
+              </CardDescription>
+            </CardHeader>
+          </Card>
+        </ScrollReveal>
 
         {/* Actions and Filters */}
         <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
@@ -183,7 +197,8 @@ const Overview = () => {
         </div>
 
         {/* Requests Table */}
-        <Card>
+        <ScrollReveal delayMs={150}>
+          <Card>
           <CardHeader>
             <CardTitle>Visit Requests</CardTitle>
             <CardDescription>
@@ -311,7 +326,8 @@ const Overview = () => {
               </Table>
             </div>
           </CardContent>
-        </Card>
+          </Card>
+        </ScrollReveal>
       </div>
     </Layout>
   );
