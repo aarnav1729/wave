@@ -46,6 +46,8 @@ export interface Approval {
   timestamp?: string;
   reason?: string;
   allottedPerson?: string;
+  approvalGroup?: string;
+  groupMode?: "all" | "any";
 }
 
 export interface VisitRequest {
@@ -75,6 +77,8 @@ export interface VisitRequest {
   // Stored as comma-separated list
   typeOfLocation: string; // e.g. "Plant", "Plant,Warehouse"
   locationToVisit: string; // e.g. "Fabcity-P2-..., Annaram"
+  selectedLocationIds?: number[];
+  workflowSetId?: number;
 
   areaToVisit: string;
 
@@ -490,9 +494,25 @@ export const saveRequest = (request: VisitRequest) => {
       headers: { "Content-Type": "application/json" },
       credentials: "include",
       body: JSON.stringify(request),
-    }).catch((err) => {
-      console.error("[saveRequest] Failed to sync request to API:", err);
-    });
+    })
+      .then(async (res) => {
+        if (!res.ok) return null;
+        const json = await res.json().catch(() => null);
+        return json?.data as VisitRequest | null;
+      })
+      .then((serverRequest) => {
+        if (!serverRequest) return;
+        const latest = getRequests();
+        const idx = latest.findIndex(
+          (r) => r.ticketNumber === serverRequest.ticketNumber
+        );
+        if (idx >= 0) latest[idx] = serverRequest;
+        else latest.push(serverRequest);
+        writeLS(STORAGE_KEYS.REQUESTS, latest);
+      })
+      .catch((err) => {
+        console.error("[saveRequest] Failed to sync request to API:", err);
+      });
   } catch (err) {
     console.error("[saveRequest] Error calling API:", err);
   }

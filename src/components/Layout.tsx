@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { setCurrentUser, getCurrentUser } from "@/lib/storage";
 import { useToast } from "@/hooks/use-toast";
+import CursorGlow from "./CursorGlow";
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -46,6 +47,7 @@ const Layout = ({ children }: LayoutProps) => {
 
   return (
     <div className="relative min-h-screen bg-background">
+      <CursorGlow />
       <div className="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
         <div className="bg-orb bg-orb-a" />
         <div className="bg-orb bg-orb-b" />

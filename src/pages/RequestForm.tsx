@@ -74,7 +74,6 @@ const normalizeDurationHours = (value?: string | null): string => {
 };
 
 type LocationType = "Office" | "Plant" | "Warehouse";
-type PlantSite = "P2" | "P3" | "P4" | "P5" | "P6" | "P7";
 
 type GuestError = {
   name: boolean;
@@ -134,50 +133,16 @@ const DEFAULT_WAREHOUSE_LOCATIONS: string[] = [
   "HSTL",
 ];
 
-const PLANT_SITES: PlantSite[] = ["P2", "P3", "P4", "P5", "P6", "P7"];
-
-const PLANT_SUB_OPTIONS: Record<PlantSite, string[]> = {
-  P2: [
-    "Module (PEPPL)",
-    "MonoPerc Cell (PEPPL)",
-    "TopCon Cell (PEPPL)",
-    "Other",
-  ],
-  P3: ["Cell (PEIPL)", "Other"],
-  P4: ["Module (PEIPL)", "Other"],
-  P5: ["Module (PEGEPL)", "Other"],
-  P6: ["Module (PEGEPL)", "Other"],
-  P7: ["Module (PEPPL)", "Other"],
-};
-
-const PLANT_OTHER_PLACEHOLDER =
-  "Eg: Admin, Utility, Facility, Stores, IT, HR, etc.";
-
-const AUTO_CELL_LINE_LOCATIONS: string[] = [
+const DEFAULT_PLANT_LOCATIONS: string[] = [
+  "P2 - Module (PEPPL)",
   "P2 - MonoPerc Cell (PEPPL)",
   "P2 - TopCon Cell (PEPPL)",
   "P3 - Cell (PEIPL)",
+  "P4 - Module (PEIPL)",
+  "P5 - Module (PEGEPL)",
+  "P6 - Module (PEGEPL)",
+  "P7 - Module (PEPPL)",
 ];
-
-// We’ll treat any location that starts with one of these as a “Plant entry”
-// so we can safely replace when user changes Plant dropdowns
-const isPlantLocationEntry = (loc: string) => /^P[2-7]\b/.test(loc.trim());
-
-const buildPlantLocationLabel = (
-  site: PlantSite | "",
-  sub: string,
-  otherText: string
-) => {
-  if (!site || !sub) return "";
-
-  if (sub === "Other") {
-    const clean = (otherText || "").trim();
-    if (!clean) return ""; // do not add incomplete "Other"
-    return `${site} - ${clean}`;
-  }
-
-  return `${site} - ${sub}`;
-};
 
 const RequestForm = () => {
   const [searchParams] = useSearchParams();
@@ -234,17 +199,14 @@ const RequestForm = () => {
   const [warehouseLocations, setWarehouseLocations] = useState<string[]>(
     DEFAULT_WAREHOUSE_LOCATIONS
   );
-  const [selectedOfficeLocation, setSelectedOfficeLocation] = useState("");
-  const [selectedWarehouseLocation, setSelectedWarehouseLocation] =
-    useState("");
+  const [plantLocations, setPlantLocations] = useState<string[]>(
+    DEFAULT_PLANT_LOCATIONS
+  );
+  const [masterLocations, setMasterLocations] = useState<MasterLocation[]>([]);
 
   // Final flattened selected locations stored as strings
   const [locationsSelected, setLocationsSelected] = useState<string[]>([]);
-
-  // Plant hierarchical state
-  const [plantSite, setPlantSite] = useState<PlantSite | "">("");
-  const [plantSubArea, setPlantSubArea] = useState<string>("");
-  const [plantOtherText, setPlantOtherText] = useState<string>("");
+  const [selectedLocationIds, setSelectedLocationIds] = useState<number[]>([]);
 
   const [areaToVisit, setAreaToVisit] = useState("");
   const [cellLineVisit, setCellLineVisit] = useState(false);
@@ -294,37 +256,12 @@ const RequestForm = () => {
           .split(",")
           .map((t) => t.trim())
           .filter(Boolean);
-
-        const warehouseEntry =
-          parsedLocs.find((l) => DEFAULT_WAREHOUSE_LOCATIONS.includes(l)) || "";
-        const officeEntry =
-          parsedLocs.find(
-            (l) => !isPlantLocationEntry(l) && l !== warehouseEntry
-          ) || "";
-        setSelectedOfficeLocation(officeEntry);
-        setSelectedWarehouseLocation(warehouseEntry);
-
-        // Try best-effort parse for new Plant UI (if a matching entry exists)
-        const plantEntry = parsedLocs.find((l) => isPlantLocationEntry(l));
-        if (plantEntry) {
-          const parts = plantEntry.split(" - ");
-          const site = (parts[0] || "").trim() as PlantSite;
-          const rest = parts.slice(1).join(" - ").trim();
-
-          if (PLANT_SITES.includes(site)) {
-            setPlantSite(site);
-
-            const allowed = PLANT_SUB_OPTIONS[site];
-
-            if (allowed.includes(rest)) {
-              setPlantSubArea(rest);
-              setPlantOtherText("");
-            } else if (rest) {
-              setPlantSubArea("Other");
-              setPlantOtherText(rest);
-            }
-          }
-        }
+        setLocationsSelected(parsedLocs);
+        setSelectedLocationIds(
+          Array.isArray((existingRequest as any).selectedLocationIds)
+            ? (existingRequest as any).selectedLocationIds
+            : []
+        );
 
         setAreaToVisit(existingRequest.areaToVisit);
         setCellLineVisit(existingRequest.cellLineVisit);
@@ -387,6 +324,7 @@ const RequestForm = () => {
             ? true
             : loc.activeflag === true || loc.activeflag === 1
         );
+        setMasterLocations(active);
 
         const office = active
           .filter((loc) => loc.locationType === "Office")
@@ -397,9 +335,14 @@ const RequestForm = () => {
           .filter((loc) => loc.locationType === "Warehouse")
           .sort((a, b) => (a.displayOrder || 0) - (b.displayOrder || 0))
           .map((loc) => loc.locationName);
+        const plant = active
+          .filter((loc) => loc.locationType === "Plant")
+          .sort((a, b) => (a.displayOrder || 0) - (b.displayOrder || 0))
+          .map((loc) => loc.locationName);
 
         if (office.length) setOfficeLocations(office);
         if (warehouse.length) setWarehouseLocations(warehouse);
+        if (plant.length) setPlantLocations(plant);
       } catch (err) {
         console.error("[RequestForm] Failed to load location masters:", err);
       }
@@ -476,63 +419,54 @@ const RequestForm = () => {
     return () => window.clearTimeout(timerId);
   }, [vehicleDialogOpen, redirectSeconds]);
 
-  // ------------------------- Plant selection → sync into locationsSelected ---
-  const plantLocationLabel = useMemo(() => {
-    return buildPlantLocationLabel(plantSite, plantSubArea, plantOtherText);
-  }, [plantSite, plantSubArea, plantOtherText]);
+  const locationTypeByName = useMemo(() => {
+    const map = new Map<string, LocationType>();
+    for (const loc of masterLocations) {
+      map.set(loc.locationName, loc.locationType);
+    }
+    for (const name of officeLocations) if (!map.has(name)) map.set(name, "Office");
+    for (const name of warehouseLocations)
+      if (!map.has(name)) map.set(name, "Warehouse");
+    for (const name of plantLocations) if (!map.has(name)) map.set(name, "Plant");
+    return map;
+  }, [masterLocations, officeLocations, warehouseLocations, plantLocations]);
+
+  const locationIdByName = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const loc of masterLocations) {
+      if (typeof loc.id === "number") map.set(loc.locationName, loc.id);
+    }
+    return map;
+  }, [masterLocations]);
+
+  // Keep selected locations consistent with chosen location types.
+  useEffect(() => {
+    setLocationsSelected((prev) =>
+      prev.filter((loc) => {
+        const t = locationTypeByName.get(loc);
+        if (!t) return true;
+        return locationTypes.includes(t);
+      })
+    );
+  }, [locationTypes, locationTypeByName]);
 
   useEffect(() => {
-    if (!plantSelected) {
-      setPlantSite("");
-      setPlantSubArea("");
-      setPlantOtherText("");
-      return;
-    }
-  }, [plantSelected]);
-
-  useEffect(() => {
-    const nextSelected: string[] = [];
-
-    if (officeSelected && selectedOfficeLocation) {
-      nextSelected.push(selectedOfficeLocation);
-    }
-    if (warehouseSelected && selectedWarehouseLocation) {
-      nextSelected.push(selectedWarehouseLocation);
-    }
-    if (plantSelected && plantLocationLabel) {
-      nextSelected.push(plantLocationLabel);
-    }
-
-    setLocationsSelected(nextSelected);
-  }, [
-    officeSelected,
-    warehouseSelected,
-    plantSelected,
-    selectedOfficeLocation,
-    selectedWarehouseLocation,
-    plantLocationLabel,
-  ]);
-
-  // Reset sub-area when site changes
-  useEffect(() => {
-    if (!plantSite) {
-      setPlantSubArea("");
-      setPlantOtherText("");
-      return;
-    }
-
-    // If current sub-area not valid for this site, reset it
-    const allowed = PLANT_SUB_OPTIONS[plantSite];
-    if (!allowed.includes(plantSubArea)) {
-      setPlantSubArea("");
-      setPlantOtherText("");
-    }
-  }, [plantSite]);
+    setSelectedLocationIds(
+      locationsSelected
+        .map((name) => locationIdByName.get(name))
+        .filter((id): id is number => typeof id === "number")
+    );
+  }, [locationsSelected, locationIdByName]);
 
   // ------------------------- Auto cell-line toggle updates -------------------
   useEffect(() => {
-    const includesCellLineLocation = locationsSelected.some((loc) =>
-      AUTO_CELL_LINE_LOCATIONS.includes(loc)
+    const cellLineSet = new Set(
+      masterLocations
+        .filter((loc) => loc.locationType === "Plant" && (loc.isCellLine === true || loc.isCellLine === 1))
+        .map((loc) => loc.locationName)
+    );
+    const includesCellLineLocation = locationsSelected.some(
+      (loc) => cellLineSet.has(loc)
     );
 
     if (!includesCellLineLocation) {
@@ -545,7 +479,13 @@ const RequestForm = () => {
       setCellLineVisit(true);
       setCellLineAutoSet(true);
     }
-  }, [locationsSelected, plantSelected, cellLineVisit, cellLineOverridden]);
+  }, [
+    locationsSelected,
+    plantSelected,
+    cellLineVisit,
+    cellLineOverridden,
+    masterLocations,
+  ]);
 
   // ------------------------- Location toggles for Office/Warehouse ------------
   const toggleLocationType = (type: LocationType, checked: boolean) => {
@@ -561,22 +501,19 @@ const RequestForm = () => {
           setCellLineVisit(false);
           setCellLineAutoSet(false);
           setCellLineOverridden(false);
-
-          setPlantSite("");
-          setPlantSubArea("");
-          setPlantOtherText("");
-        }
-
-        if (type === "Office" && !next.includes("Office")) {
-          setSelectedOfficeLocation("");
-        }
-
-        if (type === "Warehouse" && !next.includes("Warehouse")) {
-          setSelectedWarehouseLocation("");
         }
 
         return next;
       }
+    });
+  };
+
+  const toggleLocation = (loc: string, checked: boolean) => {
+    setLocationsSelected((prev) => {
+      if (checked) {
+        return Array.from(new Set([...prev, loc]));
+      }
+      return prev.filter((x) => x !== loc);
     });
   };
 
@@ -669,10 +606,19 @@ const RequestForm = () => {
     if (!currentUser) return;
 
     const durationNumber = parseFloat(tentativeDuration);
-    const hasOfficeSelection = !officeSelected || !!selectedOfficeLocation;
+    const hasOfficeSelection =
+      !officeSelected ||
+      locationsSelected.some(
+        (loc) => locationTypeByName.get(loc) === "Office"
+      );
     const hasWarehouseSelection =
-      !warehouseSelected || !!selectedWarehouseLocation;
-    const hasPlantSelection = !plantSelected || !!plantLocationLabel;
+      !warehouseSelected ||
+      locationsSelected.some(
+        (loc) => locationTypeByName.get(loc) === "Warehouse"
+      );
+    const hasPlantSelection =
+      !plantSelected ||
+      locationsSelected.some((loc) => locationTypeByName.get(loc) === "Plant");
     const hasAllRequiredTypeSelections =
       hasOfficeSelection && hasWarehouseSelection && hasPlantSelection;
 
@@ -773,6 +719,7 @@ const RequestForm = () => {
       meetingWith,
       typeOfLocation: typeOfLocationJoined,
       locationToVisit: locationToVisitJoined,
+      selectedLocationIds,
       areaToVisit,
       cellLineVisit,
       anythingElse,
@@ -1340,21 +1287,22 @@ const RequestForm = () => {
                     <p className="text-xs font-medium text-muted-foreground mb-2">
                       Office
                     </p>
-                    <Select
-                      value={selectedOfficeLocation || undefined}
-                      onValueChange={setSelectedOfficeLocation}
-                    >
-                      <SelectTrigger>
-                        <SelectValue placeholder="Select one office location" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {officeLocations.map((loc) => (
-                          <SelectItem key={loc} value={loc}>
-                            {loc}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      {officeLocations.map((loc) => (
+                        <label
+                          key={loc}
+                          className="flex items-center gap-2 text-sm cursor-pointer"
+                        >
+                          <Checkbox
+                            checked={locationsSelected.includes(loc)}
+                            onCheckedChange={(checked) =>
+                              toggleLocation(loc, Boolean(checked))
+                            }
+                          />
+                          <span>{loc}</span>
+                        </label>
+                      ))}
+                    </div>
                   </div>
                 )}
 
@@ -1368,113 +1316,50 @@ const RequestForm = () => {
                     <p className="text-xs font-medium text-muted-foreground mb-2">
                       Warehouse
                     </p>
-                    <Select
-                      value={selectedWarehouseLocation || undefined}
-                      onValueChange={setSelectedWarehouseLocation}
-                    >
-                      <SelectTrigger>
-                        <SelectValue placeholder="Select one warehouse location" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {warehouseLocations.map((loc) => (
-                          <SelectItem key={loc} value={loc}>
-                            {loc}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      {warehouseLocations.map((loc) => (
+                        <label
+                          key={loc}
+                          className="flex items-center gap-2 text-sm cursor-pointer"
+                        >
+                          <Checkbox
+                            checked={locationsSelected.includes(loc)}
+                            onCheckedChange={(checked) =>
+                              toggleLocation(loc, Boolean(checked))
+                            }
+                          />
+                          <span>{loc}</span>
+                        </label>
+                      ))}
+                    </div>
                   </div>
                 )}
 
-                {/* Plant hierarchy */}
+                {/* Plant */}
                 {plantSelected && (
                   <div
-                    className={`rounded-md border px-3 py-3 space-y-3 ${
+                    className={`rounded-md border px-3 py-3 ${
                       fieldErrors.locationsSelected ? "border-destructive" : ""
                     }`}
                   >
-                    <p className="text-xs font-medium text-muted-foreground">
+                    <p className="text-xs font-medium text-muted-foreground mb-2">
                       Plant
                     </p>
-
-                    {/* Site dropdown */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      <div className="space-y-2">
-                        <Label>Plant Site *</Label>
-                        <Select
-                          value={plantSite}
-                          onValueChange={(v) => setPlantSite(v as PlantSite)}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      {plantLocations.map((loc) => (
+                        <label
+                          key={loc}
+                          className="flex items-center gap-2 text-sm cursor-pointer"
                         >
-                          <SelectTrigger>
-                            <SelectValue placeholder="Select Plant (P2 - P7)" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {PLANT_SITES.map((p) => (
-                              <SelectItem key={p} value={p}>
-                                {p}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-
-                      {/* Sub-area dropdown */}
-                      <div className="space-y-2">
-                        <Label>Plant Area *</Label>
-                        <Select
-                          value={plantSubArea}
-                          onValueChange={(v) => setPlantSubArea(v)}
-                          disabled={!plantSite}
-                        >
-                          <SelectTrigger>
-                            <SelectValue
-                              placeholder={
-                                plantSite
-                                  ? "Select area"
-                                  : "Select plant site first"
-                              }
-                            />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {(plantSite
-                              ? PLANT_SUB_OPTIONS[plantSite]
-                              : []
-                            ).map((opt) => (
-                              <SelectItem key={opt} value={opt}>
-                                {opt}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                    </div>
-
-                    {/* Other text input */}
-                    {plantSite && plantSubArea === "Other" && (
-                      <div className="space-y-2">
-                        <Label>Specify Plant Area *</Label>
-                        <Input
-                          value={plantOtherText}
-                          onChange={(e) => setPlantOtherText(e.target.value)}
-                          placeholder={PLANT_OTHER_PLACEHOLDER}
-                        />
-                        <p className="text-[11px] text-muted-foreground">
-                          This will be stored as:{" "}
-                          <span className="font-medium">
-                            {plantSite} - {plantOtherText || "…"}
-                          </span>
-                        </p>
-                      </div>
-                    )}
-
-                    {/* Read-only preview */}
-                    <div className="rounded-md bg-muted px-3 py-2">
-                      <p className="text-xs text-muted-foreground">
-                        Selected Plant Location:
-                      </p>
-                      <p className="text-sm font-medium">
-                        {plantLocationLabel || "Not selected yet"}
-                      </p>
+                          <Checkbox
+                            checked={locationsSelected.includes(loc)}
+                            onCheckedChange={(checked) =>
+                              toggleLocation(loc, Boolean(checked))
+                            }
+                          />
+                          <span>{loc}</span>
+                        </label>
+                      ))}
                     </div>
                   </div>
                 )}

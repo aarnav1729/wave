@@ -345,31 +345,24 @@ const SWAVEDetail = () => {
         : approval
     );
 
-    // Cell-line workflow: either Chandra or Saluja can approve.
-    // If one approves, auto-satisfy the other to keep the request flowing.
-    const hasCellLineEitherPair =
-      updatedApprovals.some(
-        (a) => String(a.approverEmail || "").toLowerCase() === chandraEmail
-      ) &&
-      updatedApprovals.some(
-        (a) => String(a.approverEmail || "").toLowerCase() === salujaEmail
-      );
-
     let approvalsAfterEitherLogic = updatedApprovals;
-    if (
-      hasCellLineEitherPair &&
-      (currentUserEmail === chandraEmail || currentUserEmail === salujaEmail)
-    ) {
+    const currentApproval = updatedApprovals.find(
+      (a) => String(a.approverEmail || "").toLowerCase() === currentUserEmail
+    );
+    const isAnyMode =
+      currentApproval?.groupMode === "any" && !!currentApproval.approvalGroup;
+
+    if (isAnyMode) {
       approvalsAfterEitherLogic = updatedApprovals.map((approval) =>
-        approval.approverEmail !== currentUserEmail &&
-        (String(approval.approverEmail || "").toLowerCase() === chandraEmail ||
-          String(approval.approverEmail || "").toLowerCase() === salujaEmail) &&
+        String(approval.approverEmail || "").toLowerCase() !==
+          currentUserEmail &&
+        approval.approvalGroup === currentApproval?.approvalGroup &&
         approval.status === "pending"
           ? {
               ...approval,
               status: "approved" as const,
               timestamp: new Date().toISOString(),
-              reason: approval.reason || "Approved via either-approver workflow",
+              reason: approval.reason || "Approved via any-one approver group",
             }
           : approval
       );

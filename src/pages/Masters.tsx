@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
 import { Badge } from "@/components/ui/badge";
@@ -33,16 +34,46 @@ type WorkflowSet = {
   plantApprovalMode: "none" | "chandra" | "either";
   notes: string | null;
   activeflag: boolean;
+  priority: number;
+  officeLocationIds: number[];
+  warehouseLocationIds: number[];
+  plantLocationIds: number[];
+  extraApproverEmails: string[];
+  anyOneApproverEmails: string[];
+};
+
+type EmployeeLite = {
+  empid: string;
+  empemail: string;
+  empname: string;
 };
 
 const toBool = (value: unknown) =>
   value === true || value === 1 || String(value).toLowerCase() === "true";
+
+const parseList = (value: unknown): string[] => {
+  if (Array.isArray(value)) return value.map((x) => String(x));
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(String(value));
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((x) => String(x));
+  } catch {
+    return [];
+  }
+};
+
+const parseNumList = (value: unknown): number[] =>
+  parseList(value)
+    .map((x) => Number(x))
+    .filter((x) => Number.isInteger(x));
 
 const Masters = () => {
   const { toast } = useToast();
 
   const [locations, setLocations] = useState<LocationMaster[]>([]);
   const [workflowSets, setWorkflowSets] = useState<WorkflowSet[]>([]);
+  const [employees, setEmployees] = useState<EmployeeLite[]>([]);
 
   const [loading, setLoading] = useState(true);
 
@@ -66,6 +97,12 @@ const Masters = () => {
     plantApprovalMode: "none" as "none" | "chandra" | "either",
     notes: "",
     activeflag: true,
+    priority: 100,
+    officeLocationIds: [] as number[],
+    warehouseLocationIds: [] as number[],
+    plantLocationIds: [] as number[],
+    extraApproverEmails: [] as string[],
+    anyOneApproverEmails: [] as string[],
   });
 
   const loadData = useCallback(async () => {
@@ -85,6 +122,19 @@ const Masters = () => {
         wfRes.json() as Promise<{ data?: WorkflowSet[] }>,
       ]);
 
+      const empRes = await fetch("/api/employees", { credentials: "include" });
+      if (empRes.ok) {
+        const empJson = await empRes.json();
+        const rows = Array.isArray(empJson.data) ? empJson.data : [];
+        setEmployees(
+          rows.map((x: any) => ({
+            empid: String(x.empid || ""),
+            empemail: String(x.empemail || "").toLowerCase(),
+            empname: String(x.empname || x.empemail || ""),
+          }))
+        );
+      }
+
       setLocations(
         (locJson.data || []).map((x) => ({
           ...x,
@@ -101,6 +151,12 @@ const Masters = () => {
           includePlant: toBool(x.includePlant),
           requiresManager: toBool(x.requiresManager),
           activeflag: toBool(x.activeflag),
+          priority: Number((x as any).priority || 100),
+          officeLocationIds: parseNumList((x as any).officeLocationIds),
+          warehouseLocationIds: parseNumList((x as any).warehouseLocationIds),
+          plantLocationIds: parseNumList((x as any).plantLocationIds),
+          extraApproverEmails: parseList((x as any).extraApproverEmails),
+          anyOneApproverEmails: parseList((x as any).anyOneApproverEmails),
         }))
       );
     } catch (err) {
@@ -211,6 +267,12 @@ const Masters = () => {
         plantApprovalMode: workflowForm.includePlant ? workflowForm.plantApprovalMode : "none",
         notes: workflowForm.notes.trim() || null,
         activeflag: workflowForm.activeflag,
+        priority: workflowForm.priority,
+        officeLocationIds: workflowForm.officeLocationIds,
+        warehouseLocationIds: workflowForm.warehouseLocationIds,
+        plantLocationIds: workflowForm.plantLocationIds,
+        extraApproverEmails: workflowForm.extraApproverEmails,
+        anyOneApproverEmails: workflowForm.anyOneApproverEmails,
       };
 
       const isEdit = workflowForm.id > 0;
@@ -241,6 +303,12 @@ const Masters = () => {
         plantApprovalMode: "none",
         notes: "",
         activeflag: true,
+        priority: 100,
+        officeLocationIds: [],
+        warehouseLocationIds: [],
+        plantLocationIds: [],
+        extraApproverEmails: [],
+        anyOneApproverEmails: [],
       });
       await loadData();
     } catch (err: unknown) {
@@ -501,7 +569,7 @@ const Masters = () => {
                   />
                 </div>
                 <div className="h-10 rounded-md border px-3 flex items-center justify-between">
-                  <span className="text-sm text-muted-foreground">Includes Plant</span>
+                      <span className="text-sm text-muted-foreground">Includes Plant</span>
                   <Switch
                     checked={workflowForm.includePlant}
                     onCheckedChange={(checked) =>
@@ -539,6 +607,111 @@ const Masters = () => {
                     <SelectItem value="either">Either Chandra or Saluja</SelectItem>
                   </SelectContent>
                 </Select>
+              </div>
+
+              <div className="space-y-2">
+                <Label>Priority (lower runs first)</Label>
+                <Input
+                  type="number"
+                  value={workflowForm.priority}
+                  onChange={(e) =>
+                    setWorkflowForm((prev) => ({
+                      ...prev,
+                      priority: Number(e.target.value || 100),
+                    }))
+                  }
+                />
+              </div>
+
+              <div className="space-y-2 rounded-md border p-3">
+                <Label>Location Match (from Masters)</Label>
+                <p className="text-xs text-muted-foreground">
+                  If left empty for a type, any location in that type matches.
+                </p>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  {(["Office", "Plant", "Warehouse"] as LocationType[]).map((t) => {
+                    const rows = locations.filter((x) => x.locationType === t);
+                    const selected =
+                      t === "Office"
+                        ? workflowForm.officeLocationIds
+                        : t === "Plant"
+                        ? workflowForm.plantLocationIds
+                        : workflowForm.warehouseLocationIds;
+                    const setSelected = (ids: number[]) => {
+                      setWorkflowForm((prev) => ({
+                        ...prev,
+                        officeLocationIds: t === "Office" ? ids : prev.officeLocationIds,
+                        plantLocationIds: t === "Plant" ? ids : prev.plantLocationIds,
+                        warehouseLocationIds:
+                          t === "Warehouse" ? ids : prev.warehouseLocationIds,
+                      }));
+                    };
+                    return (
+                      <div key={t} className="space-y-1">
+                        <p className="text-xs font-medium">{t}</p>
+                        {rows.map((loc) => (
+                          <label key={loc.id} className="flex items-center gap-2 text-xs">
+                            <Checkbox
+                              checked={selected.includes(loc.id)}
+                              onCheckedChange={(checked) =>
+                                setSelected(
+                                  checked
+                                    ? Array.from(new Set([...selected, loc.id]))
+                                    : selected.filter((id) => id !== loc.id)
+                                )
+                              }
+                            />
+                            <span>{loc.locationName}</span>
+                          </label>
+                        ))}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="space-y-2 rounded-md border p-3">
+                <Label>Extra Approvers (all required)</Label>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-44 overflow-auto">
+                  {employees.map((emp) => (
+                    <label key={emp.empid} className="flex items-center gap-2 text-xs">
+                      <Checkbox
+                        checked={workflowForm.extraApproverEmails.includes(emp.empemail)}
+                        onCheckedChange={(checked) =>
+                          setWorkflowForm((prev) => ({
+                            ...prev,
+                            extraApproverEmails: checked
+                              ? Array.from(new Set([...prev.extraApproverEmails, emp.empemail]))
+                              : prev.extraApproverEmails.filter((x) => x !== emp.empemail),
+                          }))
+                        }
+                      />
+                      <span>{emp.empname} ({emp.empemail})</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-2 rounded-md border p-3">
+                <Label>Any-One Approvers (either one can approve)</Label>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-44 overflow-auto">
+                  {employees.map((emp) => (
+                    <label key={`any-${emp.empid}`} className="flex items-center gap-2 text-xs">
+                      <Checkbox
+                        checked={workflowForm.anyOneApproverEmails.includes(emp.empemail)}
+                        onCheckedChange={(checked) =>
+                          setWorkflowForm((prev) => ({
+                            ...prev,
+                            anyOneApproverEmails: checked
+                              ? Array.from(new Set([...prev.anyOneApproverEmails, emp.empemail]))
+                              : prev.anyOneApproverEmails.filter((x) => x !== emp.empemail),
+                          }))
+                        }
+                      />
+                      <span>{emp.empname} ({emp.empemail})</span>
+                    </label>
+                  ))}
+                </div>
               </div>
 
               <div className="space-y-2">
@@ -580,6 +753,12 @@ const Masters = () => {
                         plantApprovalMode: "none",
                         notes: "",
                         activeflag: true,
+                        priority: 100,
+                        officeLocationIds: [],
+                        warehouseLocationIds: [],
+                        plantLocationIds: [],
+                        extraApproverEmails: [],
+                        anyOneApproverEmails: [],
                       })
                     }
                   >
@@ -637,6 +816,12 @@ const Masters = () => {
                                   plantApprovalMode: wf.plantApprovalMode,
                                   notes: wf.notes || "",
                                   activeflag: wf.activeflag,
+                                  priority: wf.priority,
+                                  officeLocationIds: wf.officeLocationIds,
+                                  warehouseLocationIds: wf.warehouseLocationIds,
+                                  plantLocationIds: wf.plantLocationIds,
+                                  extraApproverEmails: wf.extraApproverEmails,
+                                  anyOneApproverEmails: wf.anyOneApproverEmails,
                                 })
                               }
                             >

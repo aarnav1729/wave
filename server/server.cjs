@@ -490,6 +490,56 @@ BEGIN
     updatedAt          DATETIME2     NOT NULL DEFAULT(SYSUTCDATETIME())
   );
 END;
+
+IF COL_LENGTH('dbo.VisitRequests', 'selectedLocationIds') IS NULL
+BEGIN
+  ALTER TABLE VisitRequests ADD selectedLocationIds NVARCHAR(MAX) NULL;
+END;
+
+IF COL_LENGTH('dbo.VisitRequests', 'workflowSetId') IS NULL
+BEGIN
+  ALTER TABLE VisitRequests ADD workflowSetId INT NULL;
+END;
+
+IF COL_LENGTH('dbo.Approvals', 'approvalGroup') IS NULL
+BEGIN
+  ALTER TABLE Approvals ADD approvalGroup NVARCHAR(100) NULL;
+END;
+
+IF COL_LENGTH('dbo.Approvals', 'groupMode') IS NULL
+BEGIN
+  ALTER TABLE Approvals ADD groupMode NVARCHAR(20) NULL;
+END;
+
+IF COL_LENGTH('dbo.WorkflowLocationSets', 'priority') IS NULL
+BEGIN
+  ALTER TABLE WorkflowLocationSets ADD priority INT NOT NULL CONSTRAINT DF_WorkflowLocationSets_Priority DEFAULT(100);
+END;
+
+IF COL_LENGTH('dbo.WorkflowLocationSets', 'officeLocationIds') IS NULL
+BEGIN
+  ALTER TABLE WorkflowLocationSets ADD officeLocationIds NVARCHAR(MAX) NULL;
+END;
+
+IF COL_LENGTH('dbo.WorkflowLocationSets', 'warehouseLocationIds') IS NULL
+BEGIN
+  ALTER TABLE WorkflowLocationSets ADD warehouseLocationIds NVARCHAR(MAX) NULL;
+END;
+
+IF COL_LENGTH('dbo.WorkflowLocationSets', 'plantLocationIds') IS NULL
+BEGIN
+  ALTER TABLE WorkflowLocationSets ADD plantLocationIds NVARCHAR(MAX) NULL;
+END;
+
+IF COL_LENGTH('dbo.WorkflowLocationSets', 'extraApproverEmails') IS NULL
+BEGIN
+  ALTER TABLE WorkflowLocationSets ADD extraApproverEmails NVARCHAR(MAX) NULL;
+END;
+
+IF COL_LENGTH('dbo.WorkflowLocationSets', 'anyOneApproverEmails') IS NULL
+BEGIN
+  ALTER TABLE WorkflowLocationSets ADD anyOneApproverEmails NVARCHAR(MAX) NULL;
+END;
 `;
 
 // ----------------------------------------------------------------------------
@@ -708,6 +758,26 @@ async function seedMasters(pool) {
         ('Plant (Cell Line)', 1, 1, 1, 1, 'either', 'If any cell line is included, either Saluja or Chandra can approve.', 1);
     END;
   `);
+
+  await pool.request().query(`
+    UPDATE WorkflowLocationSets
+       SET extraApproverEmails =
+         CASE
+           WHEN plantApprovalMode = 'chandra' THEN '["chandra.kumar@premierenergies.com"]'
+           ELSE extraApproverEmails
+         END
+     WHERE (extraApproverEmails IS NULL OR LTRIM(RTRIM(extraApproverEmails)) = '')
+       AND includePlant = 1;
+
+    UPDATE WorkflowLocationSets
+       SET anyOneApproverEmails =
+         CASE
+           WHEN plantApprovalMode = 'either' THEN '["chandra.kumar@premierenergies.com","saluja@premierenergies.com"]'
+           ELSE anyOneApproverEmails
+         END
+     WHERE (anyOneApproverEmails IS NULL OR LTRIM(RTRIM(anyOneApproverEmails)) = '')
+       AND includePlant = 1;
+  `);
 }
 
 // ----------------------------------------------------------------------------
@@ -750,6 +820,255 @@ function toBit(value) {
     .trim()
     .toLowerCase();
   return s === "true" || s === "1" || s === "yes" ? 1 : 0;
+}
+
+function parseJsonArray(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw;
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeEmailList(raw) {
+  const base = parseJsonArray(raw);
+  return base
+    .map((x) => String(x || "").trim().toLowerCase())
+    .filter(Boolean);
+}
+
+async function resolveApproverByEmail(pool, email) {
+  const normalized = String(email || "").trim().toLowerCase();
+  if (!normalized) return null;
+  const result = await pool
+    .request()
+    .input("email", sql.NVarChar(255), normalized)
+    .query(
+      "SELECT TOP 1 empid, empemail FROM Employees WHERE LOWER(empemail)=@email"
+    );
+  if (!result.recordset.length) return null;
+  return result.recordset[0];
+}
+
+function findMatchingWorkflowSet(sets, selectedLocationsByType) {
+  const hasOffice = selectedLocationsByType.office.length > 0;
+  const hasWarehouse = selectedLocationsByType.warehouse.length > 0;
+  const hasPlant = selectedLocationsByType.plant.length > 0;
+
+  const matches = sets.filter((set) => {
+    const includeOffice = !!set.includeOffice;
+    const includeWarehouse = !!set.includeWarehouse;
+    const includePlant = !!set.includePlant;
+
+    if (includeOffice && !hasOffice) return false;
+    if (includeWarehouse && !hasWarehouse) return false;
+    if (includePlant && !hasPlant) return false;
+
+    const officeIds = parseJsonArray(set.officeLocationIds).map(Number);
+    const warehouseIds = parseJsonArray(set.warehouseLocationIds).map(Number);
+    const plantIds = parseJsonArray(set.plantLocationIds).map(Number);
+
+    const hasOfficeConstraint = officeIds.length > 0;
+    const hasWarehouseConstraint = warehouseIds.length > 0;
+    const hasPlantConstraint = plantIds.length > 0;
+
+    if (
+      hasOfficeConstraint &&
+      !selectedLocationsByType.office.some((loc) => officeIds.includes(loc.id))
+    ) {
+      return false;
+    }
+
+    if (
+      hasWarehouseConstraint &&
+      !selectedLocationsByType.warehouse.some((loc) =>
+        warehouseIds.includes(loc.id)
+      )
+    ) {
+      return false;
+    }
+
+    if (
+      hasPlantConstraint &&
+      !selectedLocationsByType.plant.some((loc) => plantIds.includes(loc.id))
+    ) {
+      return false;
+    }
+
+    return true;
+  });
+
+  if (!matches.length) return null;
+
+  matches.sort((a, b) => {
+    const pa = Number.isFinite(Number(a.priority)) ? Number(a.priority) : 100;
+    const pb = Number.isFinite(Number(b.priority)) ? Number(b.priority) : 100;
+    if (pa !== pb) return pa - pb;
+
+    const aScore =
+      parseJsonArray(a.officeLocationIds).length +
+      parseJsonArray(a.warehouseLocationIds).length +
+      parseJsonArray(a.plantLocationIds).length +
+      (a.includeOffice ? 1 : 0) +
+      (a.includeWarehouse ? 1 : 0) +
+      (a.includePlant ? 1 : 0);
+    const bScore =
+      parseJsonArray(b.officeLocationIds).length +
+      parseJsonArray(b.warehouseLocationIds).length +
+      parseJsonArray(b.plantLocationIds).length +
+      (b.includeOffice ? 1 : 0) +
+      (b.includeWarehouse ? 1 : 0) +
+      (b.includePlant ? 1 : 0);
+    return bScore - aScore;
+  });
+
+  return matches[0];
+}
+
+async function buildApprovalsForRequest(pool, requestBody, requesterEmpId) {
+  const requester = await pool
+    .request()
+    .input("empid", sql.NVarChar(50), requesterEmpId)
+    .query(
+      "SELECT TOP 1 empid, empemail, managerid FROM Employees WHERE empid=@empid"
+    );
+
+  const requesterRow = requester.recordset[0] || null;
+  const selectedLocationIds = Array.isArray(requestBody.selectedLocationIds)
+    ? requestBody.selectedLocationIds.map((x) => Number(x)).filter((x) => Number.isInteger(x) && x > 0)
+    : [];
+
+  let selectedLocations = [];
+  if (selectedLocationIds.length) {
+    const idCsv = selectedLocationIds.join(",");
+    const result = await pool.request().query(`
+      SELECT id, locationType, locationName, isCellLine
+      FROM LocationMasters
+      WHERE activeflag = 1
+        AND id IN (${idCsv})
+    `);
+    selectedLocations = result.recordset || [];
+  } else {
+    const names = String(requestBody.locationToVisit || "")
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
+    if (names.length) {
+      const result = await pool.request().query(`
+        SELECT id, locationType, locationName, isCellLine
+        FROM LocationMasters
+        WHERE activeflag = 1
+      `);
+      const byName = new Map(
+        result.recordset.map((r) => [String(r.locationName).trim(), r])
+      );
+      selectedLocations = names.map((n) => byName.get(n)).filter(Boolean);
+    }
+  }
+
+  const selectedLocationsByType = {
+    office: selectedLocations.filter((l) => l.locationType === "Office"),
+    warehouse: selectedLocations.filter((l) => l.locationType === "Warehouse"),
+    plant: selectedLocations.filter((l) => l.locationType === "Plant"),
+  };
+
+  const hasPlant = selectedLocationsByType.plant.length > 0;
+  const hasCellLine = selectedLocationsByType.plant.some(
+    (l) => l.isCellLine === true || l.isCellLine === 1
+  );
+
+  const wfSets = await pool
+    .request()
+    .query("SELECT * FROM WorkflowLocationSets WHERE activeflag = 1");
+  const matchedSet = findMatchingWorkflowSet(
+    wfSets.recordset || [],
+    selectedLocationsByType
+  );
+
+  const approvals = [];
+  const pushApprover = (approverId, approverEmail, extra = {}) => {
+    const email = String(approverEmail || "").trim().toLowerCase();
+    if (!email) return;
+    if (approvals.some((a) => a.approverEmail === email && a.approvalGroup === (extra.approvalGroup || null))) {
+      return;
+    }
+    approvals.push({
+      approverId: String(approverId || email),
+      approverEmail: email,
+      status: "pending",
+      ...extra,
+    });
+  };
+
+  if (matchedSet) {
+    if (toBit(matchedSet.requiresManager) && requesterRow?.managerid) {
+      const manager = await pool
+        .request()
+        .input("managerid", sql.NVarChar(50), String(requesterRow.managerid))
+        .query(
+          "SELECT TOP 1 empid, empemail FROM Employees WHERE empid=@managerid"
+        );
+      if (manager.recordset.length) {
+        pushApprover(manager.recordset[0].empid, manager.recordset[0].empemail);
+      }
+    }
+
+    const extraApprovers = normalizeEmailList(matchedSet.extraApproverEmails);
+    for (const email of extraApprovers) {
+      const emp = await resolveApproverByEmail(pool, email);
+      pushApprover(emp?.empid || email, email, { groupMode: "all" });
+    }
+
+    const anyOneApprovers = normalizeEmailList(matchedSet.anyOneApproverEmails);
+    const groupId =
+      anyOneApprovers.length > 0 ? `WF_ANY_${matchedSet.id}` : null;
+    for (const email of anyOneApprovers) {
+      const emp = await resolveApproverByEmail(pool, email);
+      pushApprover(emp?.empid || email, email, {
+        approvalGroup: groupId,
+        groupMode: "any",
+      });
+    }
+  } else {
+    // Safe fallback to built-in defaults when no master rule matches.
+    if (requesterRow?.managerid) {
+      const manager = await pool
+        .request()
+        .input("managerid", sql.NVarChar(50), String(requesterRow.managerid))
+        .query(
+          "SELECT TOP 1 empid, empemail FROM Employees WHERE empid=@managerid"
+        );
+      if (manager.recordset.length) {
+        pushApprover(manager.recordset[0].empid, manager.recordset[0].empemail);
+      }
+    }
+
+    if (hasPlant) {
+      pushApprover("PEPPL0548", "chandra.kumar@premierenergies.com");
+      if (hasCellLine) {
+        pushApprover("10000", "saluja@premierenergies.com", {
+          approvalGroup: "DEFAULT_CELLLINE_ANY",
+          groupMode: "any",
+        });
+        const chandra = approvals.find(
+          (a) => a.approverEmail === "chandra.kumar@premierenergies.com"
+        );
+        if (chandra) {
+          chandra.approvalGroup = "DEFAULT_CELLLINE_ANY";
+          chandra.groupMode = "any";
+        }
+      }
+    }
+  }
+
+  return {
+    approvals,
+    workflowSetId: matchedSet ? matchedSet.id : null,
+    selectedLocationIds: selectedLocations.map((x) => Number(x.id)).filter((x) => Number.isInteger(x)),
+  };
 }
 
 // ----------------------------------------------------------------------------
@@ -937,7 +1256,9 @@ async function fetchHydratedRequests(filterTicketNumber = null) {
       vr.visitorTagNumber,
       vr.plantSite,
       vr.plantArea,
-      vr.plantAreaOther
+      vr.plantAreaOther,
+      vr.selectedLocationIds,
+      vr.workflowSetId
     FROM VisitRequests vr
   `;
 
@@ -957,7 +1278,7 @@ async function fetchHydratedRequests(filterTicketNumber = null) {
       pool
         .request()
         .query(
-          "SELECT id, ticketNumber, approverId, approverEmail, status, [timestamp], reason, allottedPerson FROM Approvals"
+          "SELECT id, ticketNumber, approverId, approverEmail, status, [timestamp], reason, allottedPerson, approvalGroup, groupMode FROM Approvals"
         ),
       pool
         .request()
@@ -999,6 +1320,8 @@ async function fetchHydratedRequests(filterTicketNumber = null) {
       timestamp: toIsoOrNull(a.timestamp) || undefined,
       reason: a.reason || undefined,
       allottedPerson: a.allottedPerson || undefined,
+      approvalGroup: a.approvalGroup || undefined,
+      groupMode: a.groupMode || undefined,
     });
   }
 
@@ -1037,6 +1360,8 @@ async function fetchHydratedRequests(filterTicketNumber = null) {
       plantSite: r.plantSite || undefined,
       plantArea: r.plantArea || undefined,
       plantAreaOther: r.plantAreaOther || undefined,
+      selectedLocationIds: parseJsonArray(r.selectedLocationIds).map(Number),
+      workflowSetId: r.workflowSetId || undefined,
     };
   });
 }
@@ -1178,6 +1503,23 @@ app.post(
     const plantArea = body.plantArea || derivedPlant.plantArea || null;
     const plantAreaOther =
       body.plantAreaOther || derivedPlant.plantAreaOther || null;
+    let workflowSetId = body.workflowSetId || null;
+    let selectedLocationIds = Array.isArray(body.selectedLocationIds)
+      ? body.selectedLocationIds
+      : [];
+
+    let finalApprovals = Array.isArray(body.approvals) ? body.approvals : [];
+    const shouldRecomputeApprovals =
+      String(body.status || "pending").toLowerCase() === "pending" &&
+      (!finalApprovals.length ||
+        finalApprovals.every((a) => String(a?.status || "pending") === "pending"));
+
+    if (shouldRecomputeApprovals) {
+      const resolved = await buildApprovalsForRequest(pool, body, empid);
+      finalApprovals = resolved.approvals;
+      workflowSetId = resolved.workflowSetId;
+      selectedLocationIds = resolved.selectedLocationIds;
+    }
 
     const tx = new sql.Transaction(pool);
 
@@ -1258,7 +1600,13 @@ app.post(
         )
         .input("plantSite", sql.NVarChar(10), plantSite)
         .input("plantArea", sql.NVarChar(255), plantArea)
-        .input("plantAreaOther", sql.NVarChar(255), plantAreaOther);
+        .input("plantAreaOther", sql.NVarChar(255), plantAreaOther)
+        .input(
+          "selectedLocationIds",
+          sql.NVarChar(sql.MAX),
+          selectedLocationIds.length ? JSON.stringify(selectedLocationIds) : null
+        )
+        .input("workflowSetId", sql.Int, workflowSetId);
 
       const upsertVisitSql = `
 IF EXISTS (SELECT 1 FROM VisitRequests WHERE ticketNumber = @ticketNumber)
@@ -1289,7 +1637,9 @@ BEGIN
       visitorTagNumber = @visitorTagNumber,
       plantSite = @plantSite,
       plantArea = @plantArea,
-      plantAreaOther = @plantAreaOther
+      plantAreaOther = @plantAreaOther,
+      selectedLocationIds = @selectedLocationIds,
+      workflowSetId = @workflowSetId
   WHERE ticketNumber = @ticketNumber;
 END
 ELSE
@@ -1302,7 +1652,7 @@ BEGIN
     meetingWith, typeOfLocation, locationToVisit, areaToVisit,
     cellLineVisit, anythingElse, attachments, creationDatetime,
     status, currentApproverIndex, visitorTagNumber,
-    plantSite, plantArea, plantAreaOther
+    plantSite, plantArea, plantAreaOther, selectedLocationIds, workflowSetId
   )
   VALUES (
     @ticketNumber, @empid, @visitorCategory, @visitorCategoryOther, @numberOfGuests,
@@ -1312,7 +1662,7 @@ BEGIN
     @meetingWith, @typeOfLocation, @locationToVisit, @areaToVisit,
     @cellLineVisit, @anythingElse, @attachments, @creationDatetime,
     @status, @currentApproverIndex, @visitorTagNumber,
-    @plantSite, @plantArea, @plantAreaOther
+    @plantSite, @plantArea, @plantAreaOther, @selectedLocationIds, @workflowSetId
   );
 END;
 `;
@@ -1366,12 +1716,16 @@ END;
         .input("ticketNumber", sql.NVarChar(50), ticketNumber)
         .query("DELETE FROM Approvals WHERE ticketNumber = @ticketNumber");
 
-      if (Array.isArray(body.approvals)) {
-        for (const a of body.approvals) {
+      if (Array.isArray(finalApprovals)) {
+        for (const a of finalApprovals) {
           const ar = new sql.Request(tx);
           ar.input("ticketNumber", sql.NVarChar(50), ticketNumber)
             .input("approverId", sql.NVarChar(50), a.approverId || "")
-            .input("approverEmail", sql.NVarChar(255), a.approverEmail || "")
+            .input(
+              "approverEmail",
+              sql.NVarChar(255),
+              String(a.approverEmail || "").toLowerCase()
+            )
             .input("status", sql.NVarChar(20), a.status || "pending")
             .input(
               "timestamp",
@@ -1383,14 +1737,16 @@ END;
               "allottedPerson",
               sql.NVarChar(255),
               a.allottedPerson || null
-            );
+            )
+            .input("approvalGroup", sql.NVarChar(100), a.approvalGroup || null)
+            .input("groupMode", sql.NVarChar(20), a.groupMode || null);
 
           await ar.query(`
             INSERT INTO Approvals (
-              ticketNumber, approverId, approverEmail, status, [timestamp], reason, allottedPerson
+              ticketNumber, approverId, approverEmail, status, [timestamp], reason, allottedPerson, approvalGroup, groupMode
             )
             VALUES (
-              @ticketNumber, @approverId, @approverEmail, @status, @timestamp, @reason, @allottedPerson
+              @ticketNumber, @approverId, @approverEmail, @status, @timestamp, @reason, @allottedPerson, @approvalGroup, @groupMode
             );
           `);
         }
@@ -1668,7 +2024,10 @@ app.get(
     const result = await pool.request().query(`
       SELECT
         id, setName, includeOffice, includeWarehouse, includePlant, requiresManager,
-        plantApprovalMode, notes, activeflag, createdAt, updatedAt
+        plantApprovalMode, notes, activeflag, priority,
+        officeLocationIds, warehouseLocationIds, plantLocationIds,
+        extraApproverEmails, anyOneApproverEmails,
+        createdAt, updatedAt
       FROM WorkflowLocationSets
       ORDER BY id ASC
     `);
@@ -1692,6 +2051,20 @@ app.post(
     const activeflag = toBit(
       typeof body.activeflag === "undefined" ? 1 : body.activeflag
     );
+    const priority = Number.isFinite(Number(body.priority))
+      ? Number(body.priority)
+      : 100;
+    const officeLocationIds = JSON.stringify(parseJsonArray(body.officeLocationIds));
+    const warehouseLocationIds = JSON.stringify(
+      parseJsonArray(body.warehouseLocationIds)
+    );
+    const plantLocationIds = JSON.stringify(parseJsonArray(body.plantLocationIds));
+    const extraApproverEmails = JSON.stringify(
+      normalizeEmailList(body.extraApproverEmails)
+    );
+    const anyOneApproverEmails = JSON.stringify(
+      normalizeEmailList(body.anyOneApproverEmails)
+    );
 
     if (!setName) {
       return res.status(400).json({ error: "setName is required" });
@@ -1713,15 +2086,38 @@ app.post(
         .input("requiresManager", sql.Bit, requiresManager)
         .input("plantApprovalMode", sql.NVarChar(20), plantApprovalMode)
         .input("notes", sql.NVarChar(500), notes)
-        .input("activeflag", sql.Bit, activeflag).query(`
+        .input("activeflag", sql.Bit, activeflag)
+        .input("priority", sql.Int, priority)
+        .input("officeLocationIds", sql.NVarChar(sql.MAX), officeLocationIds)
+        .input(
+          "warehouseLocationIds",
+          sql.NVarChar(sql.MAX),
+          warehouseLocationIds
+        )
+        .input("plantLocationIds", sql.NVarChar(sql.MAX), plantLocationIds)
+        .input(
+          "extraApproverEmails",
+          sql.NVarChar(sql.MAX),
+          extraApproverEmails
+        )
+        .input(
+          "anyOneApproverEmails",
+          sql.NVarChar(sql.MAX),
+          anyOneApproverEmails
+        ).query(`
           INSERT INTO WorkflowLocationSets (
             setName, includeOffice, includeWarehouse, includePlant,
-            requiresManager, plantApprovalMode, notes, activeflag, createdAt, updatedAt
+            requiresManager, plantApprovalMode, notes, activeflag,
+            priority, officeLocationIds, warehouseLocationIds, plantLocationIds,
+            extraApproverEmails, anyOneApproverEmails,
+            createdAt, updatedAt
           )
           OUTPUT INSERTED.*
           VALUES (
             @setName, @includeOffice, @includeWarehouse, @includePlant,
             @requiresManager, @plantApprovalMode, @notes, @activeflag,
+            @priority, @officeLocationIds, @warehouseLocationIds, @plantLocationIds,
+            @extraApproverEmails, @anyOneApproverEmails,
             SYSUTCDATETIME(), SYSUTCDATETIME()
           )
         `);
@@ -1756,6 +2152,20 @@ app.put(
     const activeflag = toBit(
       typeof body.activeflag === "undefined" ? 1 : body.activeflag
     );
+    const priority = Number.isFinite(Number(body.priority))
+      ? Number(body.priority)
+      : 100;
+    const officeLocationIds = JSON.stringify(parseJsonArray(body.officeLocationIds));
+    const warehouseLocationIds = JSON.stringify(
+      parseJsonArray(body.warehouseLocationIds)
+    );
+    const plantLocationIds = JSON.stringify(parseJsonArray(body.plantLocationIds));
+    const extraApproverEmails = JSON.stringify(
+      normalizeEmailList(body.extraApproverEmails)
+    );
+    const anyOneApproverEmails = JSON.stringify(
+      normalizeEmailList(body.anyOneApproverEmails)
+    );
 
     if (!setName) {
       return res.status(400).json({ error: "setName is required" });
@@ -1777,7 +2187,25 @@ app.put(
       .input("requiresManager", sql.Bit, requiresManager)
       .input("plantApprovalMode", sql.NVarChar(20), plantApprovalMode)
       .input("notes", sql.NVarChar(500), notes)
-      .input("activeflag", sql.Bit, activeflag).query(`
+      .input("activeflag", sql.Bit, activeflag)
+      .input("priority", sql.Int, priority)
+      .input("officeLocationIds", sql.NVarChar(sql.MAX), officeLocationIds)
+      .input(
+        "warehouseLocationIds",
+        sql.NVarChar(sql.MAX),
+        warehouseLocationIds
+      )
+      .input("plantLocationIds", sql.NVarChar(sql.MAX), plantLocationIds)
+      .input(
+        "extraApproverEmails",
+        sql.NVarChar(sql.MAX),
+        extraApproverEmails
+      )
+      .input(
+        "anyOneApproverEmails",
+        sql.NVarChar(sql.MAX),
+        anyOneApproverEmails
+      ).query(`
         UPDATE WorkflowLocationSets
         SET
           setName = @setName,
@@ -1788,6 +2216,12 @@ app.put(
           plantApprovalMode = @plantApprovalMode,
           notes = @notes,
           activeflag = @activeflag,
+          priority = @priority,
+          officeLocationIds = @officeLocationIds,
+          warehouseLocationIds = @warehouseLocationIds,
+          plantLocationIds = @plantLocationIds,
+          extraApproverEmails = @extraApproverEmails,
+          anyOneApproverEmails = @anyOneApproverEmails,
           updatedAt = SYSUTCDATETIME()
         OUTPUT INSERTED.*
         WHERE id = @id
