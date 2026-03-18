@@ -35,7 +35,7 @@ const DIGI_ORIGIN =
   (import.meta as any).env?.VITE_DIGI_ORIGIN?.trim() ||
   "https://digi.premierenergies.com";
 
-const SECURITY_EMAIL = "security@premierenergies.com";
+const SECURITY_EMAIL = "northgate.p2@premierenergies.com";
 
 function isSecurityEmail(email?: string | null) {
   return (
